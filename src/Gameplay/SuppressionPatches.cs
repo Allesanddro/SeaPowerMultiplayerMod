@@ -22,11 +22,14 @@ namespace SeapowerMultiplayer
         /// taskforce (the host's EnemyTaskforce after the client's side swap). Used
         /// to suppress carrier AUTONOMY for those units (the remote player commands
         /// their own flight ops). Per-unit AI otherwise stays alive - it runs their
-        /// auto-defence, governed by the weapon status the remote player sets.</summary>
+        /// auto-defence, governed by the weapon status the remote player sets.
+        /// Gated on IsHostRunning (not IsEstablished): from the moment hosting
+        /// starts the remote side is player-owned, so its AI must not launch
+        /// attacks while the host waits for the player to connect.</summary>
         internal static bool HostSuppressesRemoteTfAi(ObjectBase? unit) =>
             Plugin.Instance.CfgIsHost.Value
             && Plugin.Instance.CfgPvP.Value
-            && NetworkManager.Instance.IsEstablished
+            && NetworkManager.Instance.IsHostRunning
             && unit != null
             && unit._taskforce != null
             && unit._taskforce == Globals._enemyTaskforce;

@@ -38,7 +38,7 @@
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,4"
-                           Text="&#x2022; Some damage desync issues remain with air targetting ground units but these appear to be largely resolved."/>
+                           Text="&#x2022; Units and missiles stutter on the client side. Can be smoothed with higher HZ updates but will take more bandwith. 20Hz missiles and 10Hz units works fine."/>
                 <TextBlock Foreground="{StaticResource TextPrimary}"
                            FontSize="13"
                            TextWrapping="Wrap"
@@ -55,12 +55,12 @@
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="Added 2 player Co Op!"/>
+                           Text="Overhauled networking for greater stability and performance. This has moved the networking from a defender authorative model to a host authorative model. "/>
                 <TextBlock Foreground="{StaticResource TextSecondary}"
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="More optimised networking."/>                
+                           Text="Fixed torpedoes and sonobuoys not syncing."/>                
                 <!-- Disclaimer -->
                 <Rectangle Height="1"
                            Fill="{StaticResource BorderColor}"
