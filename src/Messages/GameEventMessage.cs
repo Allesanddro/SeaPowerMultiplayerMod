@@ -15,6 +15,7 @@ namespace SeapowerMultiplayer.Messages
         TimeProposalResponse = 8,   // vote mode: accept (Param=1) or decline (Param=0)
         UnitSelected         = 9,   // co-op: notify remote player which unit we selected
         UnitDeselected       = 10,  // co-op: notify remote player we deselected our unit
+        MissionEnd           = 11,  // v2: host → client, mission ended (host-decided)
     }
 
     /// <summary>

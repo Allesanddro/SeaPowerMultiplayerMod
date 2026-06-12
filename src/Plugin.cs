@@ -28,9 +28,15 @@ namespace SeapowerMultiplayer
 
         // Debug config
         internal ConfigEntry<bool> CfgVerboseDebug = null!;
+        internal ConfigEntry<float> CfgNetSimLossPct = null!;
+        internal ConfigEntry<int> CfgNetSimLatencyMs = null!;
 
         // PvP sync tuning
         internal ConfigEntry<float> CfgDamageSyncInterval = null!;
+
+        // State stream rates (host)
+        internal ConfigEntry<int> CfgMissileStateHz = null!;
+        internal ConfigEntry<int> CfgUnitStateHz = null!;
 
         private Harmony _harmony = null!;
         private int _sceneReadyFrames;
@@ -53,12 +59,27 @@ namespace SeapowerMultiplayer
             // Debug
             CfgVerboseDebug = Config.Bind("Debug", "VerboseLogging", false,
                 "Enable verbose per-tick debug logging (Serialize counts, AutoFire diagnostics, Net received)");
+            CfgNetSimLossPct = Config.Bind("Debug", "NetSimPacketLossPct", 0f,
+                "TESTING ONLY: drop this percentage of incoming Unreliable packets (LiteNetLib transport)");
+            CfgNetSimLatencyMs = Config.Bind("Debug", "NetSimLatencyMs", 0,
+                "TESTING ONLY: delay all incoming packets by this many milliseconds (LiteNetLib transport)");
 
             // PvP sync tuning
             CfgDamageSyncInterval   = Config.Bind("Sync", "DamageSyncInterval",     2f,   "Seconds between damage state corrections (default 2)");
 
+            // State stream rates (host → client)
+            CfgMissileStateHz = Config.Bind("Sync", "MissileStateHz", 20,
+                "Host missile state stream rate in Hz (1-60, default 20)");
+            CfgUnitStateHz    = Config.Bind("Sync", "UnitStateHz",    10,
+                "Host unit/torpedo state stream rate in Hz (1-60, default 10)");
+
+            // Two-instance test harness: SPMP_* environment variables override the
+            // shared config file so one install can run host + client instances.
+            ApplyEnvOverrides();
+
             // Attach helper MonoBehaviours to this same GameObject
             gameObject.AddComponent<StateBroadcaster>();
+            gameObject.AddComponent<HostEntityStreamer>();
             gameObject.AddComponent<MultiplayerUI>();
 
             // Apply Harmony patches
@@ -87,33 +108,118 @@ namespace SeapowerMultiplayer
                 }
             }
 
-            // Auto-connect only for LiteNetLib mode
-            if (CfgAutoConnect.Value && CfgTransport.Value != "Steam")
+            // Auto-connect (LiteNetLib) is deferred to Update() - see TryAutoConnect().
+            // It must NOT run here: at Awake() the network pump (Update -> Tick ->
+            // Poll) isn't ticking yet, so a connection opened now completes on
+            // LiteNetLib's background thread while no Poll runs. The client never
+            // processes "peer connected" (and never sends its Hello) until its main
+            // loop finally pumps - by which point the host's 5 s Hello deadline has
+            // expired and it has dropped the connection.
+        }
+
+        /// <summary>
+        /// SPMP_* environment variables override config values for this run.
+        /// When any override is active, config persistence is disabled so the
+        /// overrides never leak into the cfg file.
+        /// CAVEAT (verified 2026-06-10): launching Sea Power.exe directly respawns
+        /// the process via Steam, dropping an injected environment - overrides
+        /// only reach the game when the environment survives (e.g. set globally).
+        /// For routine two-instance testing, set each install's own cfg instead
+        /// (Steam install = host, desktop copy = client, both AutoConnect).
+        /// </summary>
+        private void ApplyEnvOverrides()
+        {
+            static string? V(string name)
             {
-                if (CfgIsHost.Value)
-                    NetworkManager.Instance.StartHost(CfgPort.Value);
-                else
-                    NetworkManager.Instance.StartClient(CfgHostIP.Value, CfgPort.Value);
+                var v = System.Environment.GetEnvironmentVariable(name);
+                return string.IsNullOrEmpty(v) ? null : v;
             }
+
+            string? role      = V("SPMP_ROLE");
+            string? hostIp    = V("SPMP_HOSTIP");
+            string? port      = V("SPMP_PORT");
+            string? pvp       = V("SPMP_PVP");
+            string? autoConn  = V("SPMP_AUTOCONNECT");
+            string? transport = V("SPMP_TRANSPORT");
+            string? simLoss   = V("SPMP_NETSIM_LOSS");
+            string? simLat    = V("SPMP_NETSIM_LATMS");
+
+            if (role == null && hostIp == null && port == null && pvp == null
+                && autoConn == null && transport == null && simLoss == null && simLat == null)
+                return;
+
+            Config.SaveOnConfigSet = false; // keep dev overrides out of the shared cfg
+
+            if (role != null)      CfgIsHost.Value      = role.Equals("host", StringComparison.OrdinalIgnoreCase);
+            if (hostIp != null)    CfgHostIP.Value      = hostIp;
+            if (port != null && int.TryParse(port, out int p))            CfgPort.Value = p;
+            if (pvp != null)       CfgPvP.Value         = pvp == "1" || pvp.Equals("true", StringComparison.OrdinalIgnoreCase);
+            if (autoConn != null)  CfgAutoConnect.Value = autoConn == "1" || autoConn.Equals("true", StringComparison.OrdinalIgnoreCase);
+            if (transport != null) CfgTransport.Value   = transport;
+            if (simLoss != null && float.TryParse(simLoss, out float l)) CfgNetSimLossPct.Value = l;
+            if (simLat != null && int.TryParse(simLat, out int ms))      CfgNetSimLatencyMs.Value = ms;
+
+            Log.LogWarning($"[Config] SPMP_* env overrides active (role={(CfgIsHost.Value ? "host" : "client")}, " +
+                $"ip={CfgHostIP.Value}, port={CfgPort.Value}, pvp={CfgPvP.Value}, autoConnect={CfgAutoConnect.Value}, " +
+                $"transport={CfgTransport.Value}, simLoss={CfgNetSimLossPct.Value}%, simLat={CfgNetSimLatencyMs.Value}ms). " +
+                "Config persistence disabled for this run.");
+        }
+
+        /// <summary>
+        /// Fires the configured LiteNetLib auto-connect once, from the Update loop
+        /// rather than Awake(), so the network pump is already running when the
+        /// connection opens. This guarantees the client's Hello is sent within a
+        /// frame of "peer connected" instead of racing the game's startup load
+        /// against the host's 5 s handshake deadline. A short settle past the first
+        /// Update keeps the frame cadence steady (we're past the boot-load hitch)
+        /// before opening the deadline-bearing handshake.
+        /// </summary>
+        private void TryAutoConnect()
+        {
+            if (_autoConnectStarted) return;
+
+            if (!CfgAutoConnect.Value || CfgTransport.Value == "Steam")
+            {
+                _autoConnectStarted = true; // nothing to do; never re-check
+                return;
+            }
+
+            if (_firstUpdateRealtime < 0f) _firstUpdateRealtime = Time.realtimeSinceStartup;
+            if (Time.realtimeSinceStartup - _firstUpdateRealtime < 1f) return;
+
+            _autoConnectStarted = true;
+            if (CfgIsHost.Value)
+                NetworkManager.Instance.StartHost(CfgPort.Value);
+            else
+                NetworkManager.Instance.StartClient(CfgHostIP.Value, CfgPort.Value);
         }
 
         private bool _loggedWaitingForSceneCreator;
         private int _sceneReadyPollCount;
+
+        // Deferred auto-connect state (see TryAutoConnect)
+        private bool  _autoConnectStarted;
+        private float _firstUpdateRealtime = -1f;
 
         private void Update()
         {
             // Pump the network manager every frame (processes queued actions on main thread)
             NetworkManager.Instance.Tick();
 
-            // Drain any PvP delayed combat actions whose timer has expired
-            OrderDelayQueue.Tick();
-            CombatEventHandler.Tick();
+            // Open the auto-connect connection now that the pump is running (not in Awake)
+            TryAutoConnect();
+
+            // Advance per-frame telemetry ring (send-bytes flatness)
+            Telemetry.FrameTick();
+
+            // v2: drive kinematic weapon replicas (client) + keep defence switch asserted
+            WeaponReplicaDriver.Tick();
+            DeckPuppetDriver.Tick();
+            CarrierOpsHandler.Tick();
+            Suppression.EnforceDefenseFlag();
 
             // Check for pending session sync retries (failed sends)
             SessionManager.TickRetry();
-
-            // Process deferred flight ops spawns (elevators were busy)
-            FlightOpsHandler.Tick();
 
             // Ctrl+F10: manual hard sync
             if (Input.GetKeyDown(KeyCode.F10) &&
@@ -188,7 +294,6 @@ namespace SeapowerMultiplayer
 
         private void OnDestroy()
         {
-            OrderDelayQueue.Clear();
             NetworkManager.Instance.Stop();
             _harmony.UnpatchSelf();
         }

@@ -14,6 +14,8 @@ namespace SeapowerMultiplayer.Launcher.Services
         public bool AutoConnect { get; set; } = false;
         public bool TimeVote { get; set; } = false;
         public bool PvP { get; set; } = false;
+        public int MissileStateHz { get; set; } = 20;
+        public int UnitStateHz { get; set; } = 10;
         public string? AcknowledgedVersion { get; set; }
     }
 
@@ -104,6 +106,18 @@ namespace SeapowerMultiplayer.Launcher.Services
                 # Setting type: Boolean
                 # Default value: false
                 TimeVote = {settings.TimeVote.ToString().ToLower()}
+
+                [Sync]
+
+                ## Host missile state stream rate in Hz (1-60, default 20)
+                # Setting type: Int32
+                # Default value: 20
+                MissileStateHz = {settings.MissileStateHz}
+
+                ## Host unit/torpedo state stream rate in Hz (1-60, default 10)
+                # Setting type: Int32
+                # Default value: 10
+                UnitStateHz = {settings.UnitStateHz}
 
                 """;
 

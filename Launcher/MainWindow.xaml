@@ -186,6 +186,28 @@
                 <CheckBox x:Name="ChkPvP"
                       Content="PvP mode (players control opposing sides)"
                       Margin="0,6,0,4"/>
+
+                <!-- State sync rates (host only) -->
+                <Label Content="State Sync Rates (Hz, 1-60, host only)" Margin="0,8,0,0"/>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <TextBlock Text="Missiles:"
+                           Foreground="{StaticResource TextSecondary}"
+                           VerticalAlignment="Center"
+                           Margin="0,0,6,0"/>
+                    <TextBox x:Name="TxtMissileHz"
+                         Text="20"
+                         Width="50"
+                         TextChanged="TxtHz_TextChanged"
+                         Margin="0,0,20,0"/>
+                    <TextBlock Text="Units:"
+                           Foreground="{StaticResource TextSecondary}"
+                           VerticalAlignment="Center"
+                           Margin="0,0,6,0"/>
+                    <TextBox x:Name="TxtUnitHz"
+                         Text="10"
+                         Width="50"
+                         TextChanged="TxtHz_TextChanged"/>
+                </StackPanel>
             </StackPanel>
 
             <!-- Buttons -->

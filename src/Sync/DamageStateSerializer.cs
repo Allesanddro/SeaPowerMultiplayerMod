@@ -105,7 +105,7 @@ namespace SeapowerMultiplayer
 
             int count = msg.CompartmentCount;
 
-            // Trigger sinking BEFORE setting values — Sink() modifies flooding rates,
+            // Trigger sinking BEFORE setting values - Sink() modifies flooding rates,
             // and our snapshot values (captured after sinking started) should overwrite them.
             if (msg.IsSinking && !comps._isSinking)
                 comps.Sink(Compartments.SinkFocus.All, false);
@@ -130,7 +130,7 @@ namespace SeapowerMultiplayer
 
             // Apply system compartment data (fire)
             // FireSeverity setter calls SetFireState() which updates fire visuals.
-            // Do NOT call CheckFire() — it calls UpdateFireDamage() which applies
+            // Do NOT call CheckFire() - it calls UpdateFireDamage() which applies
             // fire damage to systems (propulsion, power). That would be an extra
             // damage tick on top of the normal OnFixedUpdate cycle.
             for (int i = 0; i < count; i++)

@@ -38,7 +38,7 @@ namespace SeapowerMultiplayer
             if (unitId != 0)
                 MapUnitViewModelRegistry.NotifyLockChanged(unitId);
 
-            // Remote switched between units — if we were spectating the released one, take over.
+            // Remote switched between units - if we were spectating the released one, take over.
             TryAutoClaim(previouslyLocked, unitId);
         }
 

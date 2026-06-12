@@ -150,7 +150,7 @@ namespace SeapowerMultiplayer.Launcher.Services
                         }
                         catch (IOException)
                         {
-                            // File might be locked — retry next iteration
+                            // File might be locked - retry next iteration
                         }
                     }
                 }

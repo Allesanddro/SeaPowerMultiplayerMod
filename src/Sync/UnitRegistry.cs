@@ -18,6 +18,7 @@ namespace SeapowerMultiplayer
         private static readonly List<LandUnit>   _landUnits   = new();
         private static readonly List<Missile>    _missiles    = new();
         private static readonly List<Torpedo>    _torpedoes   = new();
+        private static readonly List<Bomb>       _bombs       = new();
 
         public static IReadOnlyList<ObjectBase> All         => _allUnits;
         public static IReadOnlyList<Vessel>     Vessels     => _vessels;
@@ -27,10 +28,14 @@ namespace SeapowerMultiplayer
         public static IReadOnlyList<LandUnit>   LandUnits   => _landUnits;
         public static IReadOnlyList<Missile>    Missiles    => _missiles;
         public static IReadOnlyList<Torpedo>    Torpedoes   => _torpedoes;
+        public static IReadOnlyList<Bomb>       Bombs       => _bombs;
 
         public static void Register(ObjectBase obj)
         {
             if (obj == null) return;
+            // Idempotent: pooled weapons re-launch without a fresh Awake, so the
+            // launch hook re-registers objects that may already be tracked.
+            if (_allUnits.Contains(obj)) return;
 
             _allUnits.Add(obj);
 
@@ -43,6 +48,7 @@ namespace SeapowerMultiplayer
                 case LandUnit l:   _landUnits.Add(l);   break;
                 case Missile m:    _missiles.Add(m);    break;
                 case Torpedo t:    _torpedoes.Add(t);   break;
+                case Bomb b:       _bombs.Add(b);       break;
             }
         }
 
@@ -61,6 +67,7 @@ namespace SeapowerMultiplayer
                 case LandUnit l:   _landUnits.Remove(l);   break;
                 case Missile m:    _missiles.Remove(m);    break;
                 case Torpedo t:    _torpedoes.Remove(t);   break;
+                case Bomb b:       _bombs.Remove(b);       break;
             }
         }
 
@@ -77,7 +84,7 @@ namespace SeapowerMultiplayer
             _landUnits.Clear();
             _missiles.Clear();
             _torpedoes.Clear();
-            ChangeTracker.Clear();
+            _bombs.Clear();
         }
 
         /// <summary>

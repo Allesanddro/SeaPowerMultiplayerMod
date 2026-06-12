@@ -19,7 +19,7 @@ namespace SeapowerMultiplayer.Messages
         public string MissionFileContent  = "";    // full text of the base mission .ini (empty for built-ins)
         public int    RngSeed;                     // deterministic seed for synchronized RNG
         public float  GameSeconds;                  // Environment.Seconds (save format drops sub-minute precision)
-        public bool   HostTimeVoteEnabled;         // host's CfgTimeVote — client must defer to this
+        public bool   HostTimeVoteEnabled;         // host's CfgTimeVote - client must defer to this
 
         public void Serialize(NetDataWriter w)
         {
@@ -69,7 +69,7 @@ namespace SeapowerMultiplayer.Messages
             }
             w.Put(raw.Length);        // int32: uncompressed byte count
             w.Put(compressed.Length); // int32: compressed byte count
-            w.Put(compressed);        // raw bytes (no length prefix — avoids ushort overflow)
+            w.Put(compressed);        // raw bytes (no length prefix - avoids ushort overflow)
         }
 
         private static string GetLargeString(NetDataReader r)

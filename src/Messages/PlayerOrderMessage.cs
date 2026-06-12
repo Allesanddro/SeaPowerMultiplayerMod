@@ -19,11 +19,14 @@ namespace SeapowerMultiplayer.Messages
         RemoveWaypoints = 12,  // Clear all waypoints for a unit
         DeleteWaypoint  = 13,  // Delete waypoint at index (index in Speed field)
         EditWaypoint    = 14,  // Move waypoint at index to new position (index in Speed, pos in DestX/Y/Z)
-        AutoFireWeapon  = 15,  // AI auto-attack (host → client), Heading carries priority
+        // 15 was AutoFireWeapon (v1 AI auto-attack replay) - do not reuse
         DropSonobuoy   = 16,  // Helicopter sonobuoy drop (PvP sync)
         SetAltitude     = 17,  // Aircraft/Helicopter preset altitude
         ReturnToBase    = 18,  // Aircraft/Helicopter RTB
         ClassifyContact = 19,  // Radar contact classification (hostile/friendly/neutral)
+        ManualGunFire   = 20,  // v2: client gun trigger → host (Heading=mount idx, TargetX/Y/Z=solution dir, AmmoId)
+        LaunchAircraft  = 21,  // v2: client carrier launch intent → host (Speed=vehicle, Heading=loadout, DestX=squadron, DestY=callsign, DestZ=count, ShotsToFire=missionType, TargetEntityId=allowLaunch)
+        LaunchChaff     = 22,  // v2: client manual chaff → host (clouds replicate back as decoys)
     }
 
     /// <summary>

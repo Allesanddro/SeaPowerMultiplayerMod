@@ -14,6 +14,10 @@ namespace SeapowerMultiplayer.Transport
         void Stop();
         void Poll();
 
+        /// <summary>Disconnect all connected peers but keep the transport alive
+        /// (host keeps listening). Used to refuse incompatible peers.</summary>
+        void DisconnectPeers();
+
         void SendToServer(byte[] data, int length, TransportDelivery delivery);
         void BroadcastToClients(byte[] data, int length, TransportDelivery delivery);
 

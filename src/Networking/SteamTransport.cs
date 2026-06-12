@@ -124,6 +124,26 @@ namespace SeapowerMultiplayer.Transport
             Log.LogInfo("[SteamTransport] Stopped.");
         }
 
+        public void DisconnectPeers()
+        {
+            if (!_running) return;
+
+            if (_isHost)
+            {
+                foreach (var conn in _clientConnections)
+                    SteamNetworkingSockets.CloseConnection(conn, 0, "Refused by host", false);
+                _clientConnections.Clear();
+                // Listen socket stays open - host remains joinable
+            }
+            else if (_connectionToHost != HSteamNetConnection.Invalid)
+            {
+                SteamNetworkingSockets.CloseConnection(_connectionToHost, 0, "Disconnecting", false);
+                _connectionToHost = HSteamNetConnection.Invalid;
+            }
+            _pendingFragments.Clear();
+            Log.LogInfo("[SteamTransport] Disconnected peers (transport stays up).");
+        }
+
         public void Poll()
         {
             if (!_running) return;
@@ -165,7 +185,7 @@ namespace SeapowerMultiplayer.Transport
                 return;
             }
 
-            // Large message — fragment for reliable delivery
+            // Large message - fragment for reliable delivery
             if (delivery == TransportDelivery.Unreliable)
             {
                 Log.LogWarning($"[SteamTransport] Unreliable message too large ({length} bytes), sending anyway");
@@ -198,7 +218,7 @@ namespace SeapowerMultiplayer.Transport
 
                 Buffer.BlockCopy(data, offset, chunk, FragmentHeaderSize, payloadLen);
 
-                // Retry with backpressure — Steam's send buffer may be full after
+                // Retry with backpressure - Steam's send buffer may be full after
                 // a large prior chunk. The game is paused during session sync so a
                 // brief main-thread block is acceptable.
                 bool sent = false;

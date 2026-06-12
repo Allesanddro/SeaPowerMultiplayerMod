@@ -48,7 +48,6 @@ namespace SeapowerMultiplayer
         private float _unitCountTimer;
         private int _ownVessels, _ownSubs, _ownAir, _ownLand, _ownMissiles, _ownTorps;
         private int _enemyVessels, _enemySubs, _enemyAir, _enemyLand, _enemyMissiles, _enemyTorps;
-        private int _remoteUnitCount;
 
         // Reflection for missile/torpedo ownership
         private static readonly FieldInfo _launchPlatformField =
@@ -63,8 +62,7 @@ namespace SeapowerMultiplayer
 
         // Foldout state for sync health sections
         private bool _foldUnits = true;
-        private bool _foldProjectiles, _foldMissileState, _foldFlightOps;
-        private bool _foldFireAuth, _foldCombatEvents;
+        private bool _foldProjectiles;
 
         // Toggle for showing/hiding sync health section panels
         private bool _syncPanelsVisible = false;
@@ -72,7 +70,7 @@ namespace SeapowerMultiplayer
         // Panel expand/collapse state (clickable header toggle)
         private bool _panelExpanded = true;
 
-        // Scroll hysteresis — prevents flicker when content is near the boundary
+        // Scroll hysteresis - prevents flicker when content is near the boundary
         private bool _scrollActive = false;
 
         // Overall sync status
@@ -137,7 +135,6 @@ namespace SeapowerMultiplayer
                 else _enemyTorps++;
             }
 
-            _remoteUnitCount = StateApplier.LastRemoteUnitCount;
         }
 
         private void InitStyles()
@@ -318,7 +315,7 @@ namespace SeapowerMultiplayer
 
                     if (dist2 <= r2)
                     {
-                        // Inside the rounded rect — apply slight AA at the edge
+                        // Inside the rounded rect - apply slight AA at the edge
                         float dist = Mathf.Sqrt(dist2);
                         float edge = Mathf.Clamp01(radius - dist + 0.5f);
                         tex.SetPixel(x, y, new Color(fill.r, fill.g, fill.b, fill.a * edge));
@@ -358,7 +355,7 @@ namespace SeapowerMultiplayer
                 : _contentHeight > maxHeight;
             _scrollActive = needsScroll;
 
-            // Outer area is just for positioning — transparent, full available height
+            // Outer area is just for positioning - transparent, full available height
             GUILayout.BeginArea(new Rect(x, Margin, PanelWidth, maxHeight));
 
             if (needsScroll)
@@ -371,7 +368,7 @@ namespace SeapowerMultiplayer
             }
             else
             {
-                // Styled vertical group auto-sizes to content — no stale height
+                // Styled vertical group auto-sizes to content - no stale height
                 GUILayout.BeginVertical(_boxStyle);
             }
 
@@ -400,7 +397,10 @@ namespace SeapowerMultiplayer
             if (NetworkManager.Instance.IsConnected)
                 DrawSyncHealth();
 
-            // End the inner vertical — GetLastRect gives true content height
+            GUILayout.Space(6);
+            DrawNet2Telemetry();
+
+            // End the inner vertical - GetLastRect gives true content height
             GUILayout.EndVertical();
             if (Event.current.type == EventType.Repaint)
                 _contentHeight = GUILayoutUtility.GetLastRect().height;
@@ -660,7 +660,7 @@ namespace SeapowerMultiplayer
             }
             else
             {
-                // Not in lobby — create one
+                // Not in lobby - create one
                 if (GUILayout.Button("Create Lobby", _buttonStyle))
                     SteamLobbyManager.CreateLobby();
             }
@@ -709,7 +709,7 @@ namespace SeapowerMultiplayer
             string timeStr = paused ? "PAUSED" : $"{tc:0.#}x";
             GUILayout.Label($"Time: {timeStr}", _labelStyle);
 
-            // Time buttons — always show, but client sends request to host
+            // Time buttons - always show, but client sends request to host
             GUILayout.BeginHorizontal();
 
             if (GUILayout.Button("<<", _buttonStyle, GUILayout.Width(40)))
@@ -744,21 +744,8 @@ namespace SeapowerMultiplayer
 
         private SyncStatus ComputeOverallStatus()
         {
-            bool isPvP = Plugin.Instance.CfgPvP.Value;
-
-            // Issues (red)
-            if (StateApplier.OrphanCandidateCount > 3) return SyncStatus.Issues;
-            if (ProjectileIdMapper.PendingHostCount + ProjectileIdMapper.PendingLocalCount > 5) return SyncStatus.Issues;
-            if (isPvP && PvPFireAuth.SuppressedCount > 10) return SyncStatus.Issues;
-
-            // Degraded (yellow)
-            if (StateApplier.OrphanCandidateCount > 0) return SyncStatus.Degraded;
-            if (ProjectileIdMapper.PendingHostCount + ProjectileIdMapper.PendingLocalCount > 0) return SyncStatus.Degraded;
-            if (FlightOpsHandler.DeferredSpawnCount > 0) return SyncStatus.Degraded;
-            if (isPvP && PvPFireAuth.SuppressedCount > 0) return SyncStatus.Degraded;
-            if (!isPvP && CombatEventHandler.EventsNotFound > 0) return SyncStatus.Degraded;
-            if (OrderDelayQueue.PendingCount > 3) return SyncStatus.Degraded;
-
+            if (StateApplier.ShipDriftMax > 100f || StateApplier.AirDriftMax > 200f) return SyncStatus.Issues;
+            if (StateApplier.ShipDriftAvg > 20f || StateApplier.AirDriftAvg > 40f) return SyncStatus.Degraded;
             return SyncStatus.OK;
         }
 
@@ -774,46 +761,8 @@ namespace SeapowerMultiplayer
 
         private SyncStatus SectionStatus_Units()
         {
-            if (StateApplier.OrphanCandidateCount > 3) return SyncStatus.Issues;
             if (StateApplier.ShipDriftMax > 100f || StateApplier.AirDriftMax > 200f) return SyncStatus.Issues;
             if (StateApplier.ShipDriftAvg > 20f || StateApplier.AirDriftAvg > 40f) return SyncStatus.Degraded;
-            if (StateApplier.OrphanCandidateCount > 0) return SyncStatus.Degraded;
-            return SyncStatus.OK;
-        }
-
-        private SyncStatus SectionStatus_Projectiles()
-        {
-            int pending = ProjectileIdMapper.PendingHostCount + ProjectileIdMapper.PendingLocalCount;
-            if (pending > 5) return SyncStatus.Issues;
-            if (pending > 0 || StateApplier.ProjectilesDestroyedByTimeout > 0) return SyncStatus.Degraded;
-            return SyncStatus.OK;
-        }
-
-        private SyncStatus SectionStatus_MissileState()
-        {
-            if (MissileStateSyncHandler.JammedCount > 0 || MissileStateSyncHandler.TargetLostCount > 0) return SyncStatus.Degraded;
-            return SyncStatus.OK;
-        }
-
-        private SyncStatus SectionStatus_FlightOps()
-        {
-            if (FlightOpsHandler.DeferredSpawnCount > 0) return SyncStatus.Degraded;
-            return SyncStatus.OK;
-        }
-
-        private SyncStatus SectionStatus_FireAuth()
-        {
-            if (PvPFireAuth.SuppressedCount > 10) return SyncStatus.Issues;
-            if (PvPFireAuth.SuppressedCount > 0) return SyncStatus.Degraded;
-            return SyncStatus.OK;
-        }
-
-        private SyncStatus SectionStatus_Combat()
-        {
-            // In PvP, "not found" is expected — both sides resolve combat independently,
-            // so the remote's event often arrives after the missile is already dead locally.
-            if (!Plugin.Instance.CfgPvP.Value && CombatEventHandler.EventsNotFound > 0)
-                return SyncStatus.Degraded;
             return SyncStatus.OK;
         }
 
@@ -831,11 +780,67 @@ namespace SeapowerMultiplayer
             return foldout;
         }
 
+        // ── NET v2 telemetry ─────────────────────────────────────────────────
+
+        private bool _foldNet2Counters;
+        private float _net2SampleAt;
+        private long _net2PrevBytesIn, _net2PrevBytesOut;
+        private float _net2RateInBps, _net2RateOutBps;
+
+        private static string FormatRate(float bps)
+            => bps >= 1024f * 1024f ? $"{bps / (1024f * 1024f):F2} MB/s"
+             : bps >= 1024f         ? $"{bps / 1024f:F1} KB/s"
+             : $"{bps:F0} B/s";
+
+        private void DrawNet2Telemetry()
+        {
+            DrawSectionTitle("≡", "NET v2");
+
+            var nm = NetworkManager.Instance;
+            GUILayout.Label($"  Protocol {Net2.ProtocolInfo.ProtocolVersion}  ·  Handshake: {nm.Handshake}", _labelStyle);
+
+            if (!nm.IsConnected) return;
+
+            // Sample traffic rates twice per second
+            if (Time.unscaledTime >= _net2SampleAt)
+            {
+                float dt = _net2SampleAt > 0f ? Mathf.Max(0.25f, Time.unscaledTime - (_net2SampleAt - 0.5f)) : 0.5f;
+                _net2RateInBps  = (Telemetry.TotalBytesIn  - _net2PrevBytesIn)  / dt;
+                _net2RateOutBps = (Telemetry.TotalBytesOut - _net2PrevBytesOut) / dt;
+                _net2PrevBytesIn  = Telemetry.TotalBytesIn;
+                _net2PrevBytesOut = Telemetry.TotalBytesOut;
+                _net2SampleAt = Time.unscaledTime + 0.5f;
+            }
+
+            GUILayout.Label($"  In {FormatRate(_net2RateInBps)}  ·  Out {FormatRate(_net2RateOutBps)}  ·  " +
+                $"Total ↓{Telemetry.TotalBytesIn / 1024}K ↑{Telemetry.TotalBytesOut / 1024}K", _dimLabelStyle);
+
+            var (sMin, sAvg, sMax) = Telemetry.FrameSendStats();
+            GUILayout.Label($"  Send/frame: min {sMin}B  avg {sAvg:F0}B  max {sMax}B", _dimLabelStyle);
+
+            GUILayout.Label($"  Replicas: {ReplicaRegistry.Count}  ·  weapons {WeaponReplicaDriver.ActiveReplicas}" +
+                $"  ·  air targets {AircraftReplicaDriver.ActiveTargets}  ·  ledger {CaptureState.SpawnLedger.Count}", _dimLabelStyle);
+
+            _foldNet2Counters = DrawSectionHeader("Counters", _foldNet2Counters, SyncStatus.OK);
+            if (_foldNet2Counters)
+            {
+                if (Telemetry.Counters.Count == 0)
+                {
+                    GUILayout.Label("  (no events)", _dimLabelStyle);
+                }
+                else
+                {
+                    foreach (var kv in Telemetry.Counters)
+                        GUILayout.Label($"  {kv.Key}: {kv.Value}", _dimLabelStyle);
+                }
+            }
+        }
+
         private void DrawSyncHealth()
         {
             bool isPvP = Plugin.Instance.CfgPvP.Value;
 
-            // Master header — foldout toggle for all sync panels
+            // Master header - foldout toggle for all sync panels
             var overall = ComputeOverallStatus();
             DrawSectionTitle("\u21bb", "SYNC HEALTH");
             
@@ -847,7 +852,7 @@ namespace SeapowerMultiplayer
             if (!_syncPanelsVisible) return;
 
             // Summary line
-            GUILayout.Label($"  RTT: {NetworkManager.Instance.LastRttMs} ms  \u00b7  Orders queued: {OrderDelayQueue.PendingCount}", _dimLabelStyle);
+            GUILayout.Label($"  RTT: {NetworkManager.Instance.LastRttMs} ms", _dimLabelStyle);
 
             GUILayout.Space(2);
 
@@ -857,7 +862,7 @@ namespace SeapowerMultiplayer
             {
                 if (isPvP)
                 {
-                    GUILayout.Label($"  Ships: own {_ownVessels}  enemy {_enemyVessels}  (remote {_remoteUnitCount})", _labelStyle);
+                    GUILayout.Label($"  Ships: own {_ownVessels}  enemy {_enemyVessels}", _labelStyle);
                     GUILayout.Label($"  Subs:  own {_ownSubs}  enemy {_enemySubs}", _labelStyle);
                     GUILayout.Label($"  Air:   own {_ownAir}  enemy {_enemyAir}", _labelStyle);
                     if (_ownLand + _enemyLand > 0)
@@ -879,15 +884,12 @@ namespace SeapowerMultiplayer
                 var airDriftStyle = StateApplier.AirDriftMax > 200f ? _warningStyle
                     : StateApplier.AirDriftAvg > 40f ? _elevatedStyle : _dimLabelStyle;
                 GUILayout.Label($"  Air drift:  {StateApplier.AirDriftAvg:F1} avg / {StateApplier.AirDriftMax:F1} max", airDriftStyle);
-
-                if (StateApplier.OrphanCandidateCount > 0)
-                    GUILayout.Label($"  Orphan candidates: {StateApplier.OrphanCandidateCount}", _warningStyle);
             }
 
             GUILayout.Space(2);
 
             // ── Projectiles ──────────────────────────────────────────────────
-            _foldProjectiles = DrawSectionHeader("Projectiles", _foldProjectiles, SectionStatus_Projectiles());
+            _foldProjectiles = DrawSectionHeader("Projectiles", _foldProjectiles, SyncStatus.OK);
             if (_foldProjectiles)
             {
                 int totalMsl = _ownMissiles + _enemyMissiles;
@@ -901,58 +903,7 @@ namespace SeapowerMultiplayer
                 {
                     GUILayout.Label($"  Missiles: {totalMsl}   Torpedoes: {totalTorp}", _labelStyle);
                 }
-                GUILayout.Label($"  ID mapped: {ProjectileIdMapper.MappedCount}  Host pend: {ProjectileIdMapper.PendingHostCount}  Local pend: {ProjectileIdMapper.PendingLocalCount}  Stale purged: {ProjectileIdMapper.StalePurgedCount}", _dimLabelStyle);
-                if (StateApplier.ProjectilesDestroyedByTimeout > 0)
-                    GUILayout.Label($"  Disappeared: {StateApplier.ProjectilesDestroyedByTimeout}", _dimLabelStyle);
             }
-
-            GUILayout.Space(2);
-
-            // ── Missile State (PvP only) ─────────────────────────────────────
-            if (isPvP)
-            {
-                _foldMissileState = DrawSectionHeader("Missile State (PvP)", _foldMissileState, SectionStatus_MissileState());
-                if (_foldMissileState)
-                {
-                    GUILayout.Label($"  State sync: {MissileStateSyncHandler.LastAppliedCount} entries last cycle", _labelStyle);
-                    GUILayout.Label($"  Jammed: {MissileStateSyncHandler.JammedCount}  Target lost: {MissileStateSyncHandler.TargetLostCount}", _dimLabelStyle);
-                }
-                GUILayout.Space(2);
-            }
-
-            // ── Flight Ops ───────────────────────────────────────────────────
-            _foldFlightOps = DrawSectionHeader("Flight Ops", _foldFlightOps, SectionStatus_FlightOps());
-            if (_foldFlightOps)
-            {
-                GUILayout.Label($"  Pipeline: {FlightOpsHandler.PipelineCount} aircraft", _labelStyle);
-                GUILayout.Label($"  Deferred spawns: {FlightOpsHandler.DeferredSpawnCount}", _dimLabelStyle);
-                GUILayout.Label($"  Synced carriers: {FlightOpsHandler.SyncedCarrierCount}", _dimLabelStyle);
-            }
-
-            GUILayout.Space(2);
-
-            // ── Fire Auth (PvP only) ─────────────────────────────────────────
-            if (isPvP)
-            {
-                _foldFireAuth = DrawSectionHeader("Fire Auth (PvP)", _foldFireAuth, SectionStatus_FireAuth());
-                if (_foldFireAuth)
-                {
-                    GUILayout.Label($"  Active: {PvPFireAuth.ActiveAuthCount} shots authorized", _labelStyle);
-                    if (PvPFireAuth.SuppressedCount > 0)
-                        GUILayout.Label($"  Suppressed: {PvPFireAuth.SuppressedCount} unauthorized", _warningStyle);
-                    else
-                        GUILayout.Label($"  Suppressed: 0 unauthorized", _dimLabelStyle);
-                }
-                GUILayout.Space(2);
-            }
-
-            // ── Combat Events ────────────────────────────────────────────────
-            _foldCombatEvents = DrawSectionHeader("Combat Events", _foldCombatEvents, SectionStatus_Combat());
-            if (_foldCombatEvents)
-            {
-                GUILayout.Label($"  Received: {CombatEventHandler.EventsReceived}  Not found: {CombatEventHandler.EventsNotFound}", _labelStyle);
-            }
-
         }
     }
 }

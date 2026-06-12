@@ -24,7 +24,7 @@ namespace SeapowerMultiplayer
         /// <summary>True while the client is loading a scene. Suppresses patches that crash during load.</summary>
         public static bool SceneLoading { get; private set; }
 
-        /// <summary>True after OnSceneReady completes — means we have a live scene that must be unloaded before reloading.</summary>
+        /// <summary>True after OnSceneReady completes - means we have a live scene that must be unloaded before reloading.</summary>
         private static bool _inGame;
 
         private static int _pendingRngSeed;
@@ -68,27 +68,16 @@ namespace SeapowerMultiplayer
             SimSyncManager.CurrentState = SimState.WaitingForClient;
             SceneLoading = false; // host isn't actually loading a scene
 
-            // Reset sync health counters on host side too
+            // Reset sync state on host side too
             UnitRegistry.Clear();
             UnitRegistry.PopulateFromScene();
-            CombatEventHandler.ResetCounters();
-            MissileStateSyncHandler.ResetCounters();
             StateApplier.ResetOrphanTracking();
-            PvPFireAuth.Clear();
             Patch_ObjectBase_HandleEngageTasks.Reset();
-            Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
-            Patch_Blastzone_OnHitWeapon.ClearInterceptions();
-            CombatEventHandler.ClearDeathWatch();
-            Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
-            Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
-            ProjectileIdMapper.Clear();
             Patch_Submarine_SetDepth.Reset();
             OrderDeduplicator.Clear();
-            FlightOpsHandler.Clear();
-            ChangeTracker.Clear();
 
-            // PvP: flush stale engage tasks on enemy puppet units so they don't
-            // consume auth tokens when the remote player issues fire orders.
+            // PvP: flush stale engage tasks on enemy puppet units so the remote
+            // player's save-restored tasks don't fire without their say-so.
             if (Plugin.Instance.CfgPvP.Value)
                 FlushEnemyEngageTasks();
 
@@ -112,7 +101,7 @@ namespace SeapowerMultiplayer
 
             // Read save data from IniHandler's in-memory cache instead of disk.
             // SaveLoadManager.WriteMissionToFile populates the IniHandler synchronously
-            // but writes to disk via Task.Run — reading the file would race against
+            // but writes to disk via Task.Run - reading the file would race against
             // that async write and return stale/old data.
             var ini = IniHandler.get(savePath);
             if (ini?.Data == null || ini.Data.Count == 0)
@@ -183,7 +172,7 @@ namespace SeapowerMultiplayer
                 }
             }
 
-            // Success — reset retry counter
+            // Success - reset retry counter
             _retryCount = 0;
 
             // Seed host RNG to match what client will use
@@ -219,20 +208,12 @@ namespace SeapowerMultiplayer
 
             try
             {
-                // Clear state and projectile ID mappings from previous session
+                // Clear state from previous session
                 UnitRegistry.Clear();
-                ProjectileIdMapper.Clear();
-                PvPDeathNotifications.Clear();
-                PvPFireAuth.Clear();
+                Patch_Vehicle_UpdateAllData_PvP.ClearCache();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
-                Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
-                Patch_Blastzone_OnHitWeapon.ClearInterceptions();
-                Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
-                Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
                 Patch_Submarine_SetDepth.Reset();
                 OrderDeduplicator.Clear();
-                FlightOpsHandler.Clear();
-                ChangeTracker.Clear();
 
                 _pendingRngSeed = msg.RngSeed;
                 _pendingGameSeconds = msg.GameSeconds;
@@ -374,7 +355,7 @@ namespace SeapowerMultiplayer
                 // EnvironmentAudioManager whose _mixer reference goes stale. Must happen
                 // AFTER DoUnload so the AudioMixer asset isn't garbage-collected by
                 // UnloadUnusedAssets (it's still referenced while the instance lives).
-                // Do NOT clear TerrainManager — DoLoad() captures its WaitForDemData/
+                // Do NOT clear TerrainManager - DoLoad() captures its WaitForDemData/
                 // WaitForTerrainChunks coroutines eagerly, and destroying the instance
                 // would make those coroutines hang forever.
                 Log.LogInfo("[Session] In-game reload: unloading old scene first");
@@ -397,7 +378,7 @@ namespace SeapowerMultiplayer
         /// <summary>
         /// Call setInitialized() on all units after save-file load.
         /// The game's save-load path doesn't reliably call setInitialized(),
-        /// leaving _canUpdate=false which gates OnFixedUpdate — ships won't move.
+        /// leaving _canUpdate=false which gates OnFixedUpdate - ships won't move.
         /// This is idempotent (just sets _canUpdate=true).
         /// </summary>
         private static void InitializeAllUnits()
@@ -474,25 +455,37 @@ namespace SeapowerMultiplayer
             SceneLoading = false;
             _inGame = true;
             StateApplier.ResetOrphanTracking();
-            PvPDeathNotifications.Clear();
-            PvPFireAuth.Clear();
-            CombatEventHandler.ResetCounters();
-            MissileStateSyncHandler.ResetCounters();
-            ProjectileIdMapper.Clear();
+            Patch_Vehicle_UpdateAllData_PvP.ClearCache();
             OrderDeduplicator.Clear();
 
             // Defer ID alignment until the first state update from the host arrives.
-            // The host has live positions — more accurate than save-file positions —
+            // The host has live positions - more accurate than save-file positions -
             // and this completely avoids name-prefix matching issues.
             if (!Plugin.Instance.CfgIsHost.Value)
-                StateApplier.SetPendingAlignment();
+            {
+                UnitReplicaDriver.SetPendingAlignment(); // v2 unit stream runs the alignment
 
-            // PvP: flush pre-existing engage tasks on enemy puppet units.
-            // The save file may contain active engage tasks that bypass all Harmony
+                // v2: save files contain in-flight weapons and the load relaunches
+                // them LIVE - demote them all to inert replicas (host streams them)
+                SpawnReplicator.DemoteLoadedWeapons();
+
+                // v2: move the client's UID counter into its private band so any
+                // client-local spawns never collide with host-assigned ids
+                var welcome = NetworkManager.Instance.SessionParams;
+                if (welcome != null && welcome.ClientUidBase > 0
+                    && SeaPower.Singleton<SeaPower.SceneCreator>.InstanceExists(false)
+                    && SeaPower.Singleton<SeaPower.SceneCreator>.Instance._UID < welcome.ClientUidBase)
+                {
+                    SeaPower.Singleton<SeaPower.SceneCreator>.Instance._UID = welcome.ClientUidBase;
+                    Plugin.Log.LogInfo($"[Session] Client UID counter rebased to {welcome.ClientUidBase}");
+                }
+            }
+
+            // PvP: flush pre-existing engage tasks on the remote player's units.
+            // The save file may contain active engage tasks that bypass the Harmony
             // suppression layers (AddEngageTask, InsertEngageTask) because they're
-            // deserialized directly into the unit's weapon queue. Without this,
-            // those tasks fire unauthorized missiles that get suppressed by PvPFireAuth,
-            // wasting ammo and corrupting the projectile ID mapper.
+            // deserialized directly into the unit's weapon queue - the remote
+            // player's units must not fire without their say-so.
             if (Plugin.Instance.CfgPvP.Value)
             {
                 FlushEnemyEngageTasks();

@@ -6,7 +6,7 @@ namespace SeapowerMultiplayer.Transport
 {
     /// <summary>
     /// Manages Steam lobby lifecycle: create, join, invite, leave.
-    /// Uses Callback&lt;T&gt;.Create() — callbacks fire automatically because the game's
+    /// Uses Callback&lt;T&gt;.Create() - callbacks fire automatically because the game's
     /// SteamManager already pumps SteamAPI.RunCallbacks() every frame.
     /// </summary>
     public static class SteamLobbyManager
@@ -19,7 +19,7 @@ namespace SeapowerMultiplayer.Transport
         public static bool InLobby => LobbyId != CSteamID.Nil;
         public static int MemberCount => InLobby ? SteamMatchmaking.GetNumLobbyMembers(LobbyId) : 0;
 
-        // Pending join from launch arg — deferred until callbacks are registered
+        // Pending join from launch arg - deferred until callbacks are registered
         private static ulong _pendingLobbyJoin;
 
         // ── Callbacks ─────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ namespace SeapowerMultiplayer.Transport
 
         /// <summary>
         /// Register Steam callbacks. Call once during plugin init.
-        /// Safe to call even if transport is LiteNetLib — callbacks just won't fire.
+        /// Safe to call even if transport is LiteNetLib - callbacks just won't fire.
         /// </summary>
         public static void Init()
         {
@@ -150,20 +150,18 @@ namespace SeapowerMultiplayer.Transport
 
             if (hostSteamId == mySteamId)
             {
-                // We're the host — already started transport in OnLobbyCreated
+                // We're the host - already started transport in OnLobbyCreated
                 Log.LogInfo("[SteamLobby] We are the host, transport already running");
                 return;
             }
 
-            // We're joining as client — store host ID for SteamTransport to read
+            // We're joining as client - store host ID for SteamTransport to read
             Log.LogInfo($"[SteamLobby] Connecting to host {hostSteamId}");
             HostSteamId = hostSteamId;
             Plugin.Instance.CfgIsHost.Value = false;
 
-            // Sync PvP from lobby metadata — otherwise a mismatched local PvP setting
-            // causes the client's WeaponBase Postfix to take the PvP "own projectile"
-            // path and send ProjectileSpawnMessage back to the host, producing an
-            // infinite interceptor feedback loop.
+            // Sync PvP from lobby metadata - a mismatched local PvP setting would
+            // otherwise be refused by the v2 handshake mode check.
             string pvpStr = SteamMatchmaking.GetLobbyData(LobbyId, "pvp");
             if (!string.IsNullOrEmpty(pvpStr) && bool.TryParse(pvpStr, out bool lobbyPvP))
             {

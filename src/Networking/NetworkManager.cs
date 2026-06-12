@@ -4,7 +4,9 @@ using BepInEx.Logging;
 using LiteNetLib;
 using LiteNetLib.Utils;
 using SeapowerMultiplayer.Messages;
+using SeapowerMultiplayer.Net2;
 using SeapowerMultiplayer.Transport;
+using UnityEngine;
 
 namespace SeapowerMultiplayer
 {
@@ -29,6 +31,21 @@ namespace SeapowerMultiplayer
 
         private static ManualLogSource Log => Plugin.Log;
 
+        // ── v2 handshake state ────────────────────────────────────────────────────
+        private HandshakeState _handshake = HandshakeState.Disconnected;
+        private float _handshakeDeadline  = -1f;   // realtimeSinceStartup
+        private float _refuseDisconnectAt = -1f;   // give the refusal Welcome time to flush
+        private const float HandshakeTimeoutSec = 5f;
+
+        public HandshakeState Handshake => _handshake;
+
+        /// <summary>True once the v2 Hello/Welcome handshake completed. All gameplay
+        /// traffic (everything except Hello/Welcome) is gated on this.</summary>
+        public bool IsEstablished => _running && _handshake == HandshakeState.Established;
+
+        /// <summary>Session parameters received in Welcome (client side only).</summary>
+        public WelcomeMessage? SessionParams { get; private set; }
+
         // ── Public API ────────────────────────────────────────────────────────────
 
         public int  LastRttMs      => _transport?.RttMs ?? 0;
@@ -44,6 +61,7 @@ namespace SeapowerMultiplayer
 
         public void StartHost(int port)
         {
+            if (_running) Stop(); // clean restart: never overwrite a live transport
             _isHost = true;
             _transport = CreateTransport();
             WireTransportEvents();
@@ -54,6 +72,7 @@ namespace SeapowerMultiplayer
 
         public void StartClient(string ip, int port)
         {
+            if (_running) Stop(); // clean restart: never overwrite a live transport
             _isHost = false;
             _transport = CreateTransport();
             WireTransportEvents();
@@ -74,23 +93,19 @@ namespace SeapowerMultiplayer
         public void Stop()
         {
             if (!_running) return;
-            OrderDelayQueue.Clear();
-            CombatEventHandler.ClearDelayed();
-            PvPDeathNotifications.Clear();
-            PvPFireAuth.Clear();
+            Patch_Vehicle_UpdateAllData_PvP.ClearCache();
             Patch_ObjectBase_HandleEngageTasks.Reset();
-            Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
-            Patch_Blastzone_OnHitWeapon.ClearInterceptions();
-            CombatEventHandler.ClearDeathWatch();
-            Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
-            Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
             _transport?.Stop();
             _transport = null;
             _running = false;
+            _handshake = HandshakeState.Disconnected;
+            _handshakeDeadline = -1f;
+            _refuseDisconnectAt = -1f;
+            SessionParams = null;
             Log.LogInfo("[Net] Stopped.");
         }
 
-        /// <summary>Called from Plugin.Update() — must run on Unity main thread.</summary>
+        /// <summary>Called from Plugin.Update() - must run on Unity main thread.</summary>
         public void Tick()
         {
             if (!_running) return;
@@ -100,6 +115,27 @@ namespace SeapowerMultiplayer
             // Drain queued main-thread actions
             while (_mainThreadQueue.TryDequeue(out var action))
                 action();
+
+            // Handshake timeout: peer connected but never completed Hello/Welcome -
+            // almost certainly a pre-v2 plugin or an incompatible phase build.
+            if (_handshakeDeadline > 0f && Time.realtimeSinceStartup > _handshakeDeadline
+                && (_handshake == HandshakeState.AwaitingHello || _handshake == HandshakeState.AwaitingWelcome))
+            {
+                Log.LogError(_isHost
+                    ? "[Handshake] No Hello from peer within timeout — peer likely runs an incompatible plugin version. Disconnecting."
+                    : "[Handshake] No Welcome from host within timeout — host likely runs an incompatible plugin version. Disconnecting.");
+                _handshakeDeadline = -1f;
+                _handshake = HandshakeState.Refused;
+                Telemetry.Count("handshake.timeout");
+                _transport?.DisconnectPeers();
+            }
+
+            // Deferred disconnect after sending a refusal Welcome (lets it flush)
+            if (_refuseDisconnectAt > 0f && Time.realtimeSinceStartup > _refuseDisconnectAt)
+            {
+                _refuseDisconnectAt = -1f;
+                _transport?.DisconnectPeers();
+            }
         }
 
         // ── Send helpers ──────────────────────────────────────────────────────────
@@ -107,19 +143,32 @@ namespace SeapowerMultiplayer
         public void SendToServer(INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
         {
             if (_transport == null) return;
+            if (BlockedPreHandshake(msg.Type)) return;
             _writer.Reset();
             _writer.Put((byte)msg.Type);
             msg.Serialize(_writer);
             _transport.SendToServer(_writer.Data, _writer.Length, MapDelivery(delivery));
+            Telemetry.OnSend((byte)msg.Type, _writer.Length);
         }
 
         public void BroadcastToClients(INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
         {
             if (_transport == null) return;
+            if (BlockedPreHandshake(msg.Type)) return;
             _writer.Reset();
             _writer.Put((byte)msg.Type);
             msg.Serialize(_writer);
             _transport.BroadcastToClients(_writer.Data, _writer.Length, MapDelivery(delivery));
+            Telemetry.OnSend((byte)msg.Type, _writer.Length);
+        }
+
+        /// <summary>Everything except Hello/Welcome waits for the handshake.</summary>
+        private bool BlockedPreHandshake(MessageType type)
+        {
+            if (type == MessageType.Hello || type == MessageType.Welcome) return false;
+            if (_handshake == HandshakeState.Established) return false;
+            Telemetry.Count("net.sendBlockedPreHandshake");
+            return true;
         }
 
         public void SendToOther(INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
@@ -163,6 +212,28 @@ namespace SeapowerMultiplayer
         private void OnPeerConnected()
         {
             Log.LogInfo("[Net] Peer connected");
+            _mainThreadQueue.Enqueue(() =>
+            {
+                if (_isHost)
+                {
+                    _handshake = HandshakeState.AwaitingHello;
+                    _handshakeDeadline = Time.realtimeSinceStartup + HandshakeTimeoutSec;
+                    Log.LogInfo("[Handshake] Awaiting client Hello...");
+                }
+                else
+                {
+                    var hello = new HelloMessage
+                    {
+                        ProtocolVersion = ProtocolInfo.ProtocolVersion,
+                        PluginVersion   = PluginInfo.PLUGIN_VERSION,
+                        IsPvP           = Plugin.Instance.CfgPvP.Value,
+                    };
+                    _handshake = HandshakeState.AwaitingWelcome;
+                    _handshakeDeadline = Time.realtimeSinceStartup + HandshakeTimeoutSec;
+                    SendToServer(hello);
+                    Log.LogInfo($"[Handshake] Hello sent (protocol {ProtocolInfo.ProtocolVersion}, pvp={hello.IsPvP}); awaiting Welcome...");
+                }
+            });
         }
 
         private void OnPeerDisconnected()
@@ -170,17 +241,26 @@ namespace SeapowerMultiplayer
             Log.LogInfo("[Net] Peer disconnected");
             _mainThreadQueue.Enqueue(() =>
             {
-                OrderDelayQueue.Clear();
+                _handshake = HandshakeState.Disconnected;
+                _handshakeDeadline = -1f;
+                _refuseDisconnectAt = -1f;
+                SessionParams = null;
+                UnitReplicaDriver.Reset();
+                AircraftReplicaDriver.Reset();
+                DeckPuppetDriver.Reset();
+                CarrierOpsHandler.Reset();
+                SpawnReplicator.Reset();
+                WeaponReplicaDriver.Reset();
+                EntityCensusManager.Reset();
+                Patch_V2_MissionEnd_Capture.Reset();
+                CaptureState.Clear();
+                ReplicaRegistry.Clear();
+                Suppression.EnforceDefenseFlag(); // restores client auto-defence
                 TaskforceAssignmentManager.Reset();
                 UnitLockManager.Reset();
                 StateApplier.ResetOrphanTracking();
-                PvPDeathNotifications.Clear();
-                PvPFireAuth.Clear();
+                Patch_Vehicle_UpdateAllData_PvP.ClearCache();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
-                Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
-                Patch_Blastzone_OnHitWeapon.ClearInterceptions();
-                Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
-                FlightOpsHandler.Clear();
                 Patch_Compartments_CalculateWantedVelocityInKnots.ClearLogCache();
                 Patch_Vessel_ApplyRudderThrust.ClearLogCache();
                 Patch_VesselPropulsionSystem_OnUpdate.ClearLogCache();
@@ -191,42 +271,102 @@ namespace SeapowerMultiplayer
         {
             var reader = new NetDataReader(data, 0, length);
             var type = (MessageType)reader.GetByte();
+            Telemetry.OnReceive((byte)type, length);
 
-            if (type != MessageType.StateUpdate && type != MessageType.MissileStateSync
-                && type != MessageType.PlayerOrder && type != MessageType.DamageState)
+            // Handshake gate: until Established, only Hello (host) / Welcome (client)
+            // are processed; everything else is dropped.
+            if (_handshake != HandshakeState.Established)
+            {
+                HandlePreHandshake(type, reader);
+                return;
+            }
+
+            if (type != MessageType.PlayerOrder && type != MessageType.DamageState)
                 Log.LogDebug($"[Net] Received {type}");
 
             switch (type)
             {
-                case MessageType.StateUpdate:
+                case MessageType.EntityStateBatch:
                 {
-                    var msg = StateUpdateMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => StateApplier.Apply(msg));
+                    var msg = EntityStateBatchMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => UnitReplicaDriver.Apply(msg));
+                    break;
+                }
+
+                case MessageType.EntitySpawn:
+                {
+                    var msg = EntitySpawnMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => SpawnReplicator.HandleSpawn(msg));
+                    break;
+                }
+
+                case MessageType.EntityDespawn:
+                {
+                    var msg = EntityDespawnMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => SpawnReplicator.HandleDespawn(msg));
+                    break;
+                }
+
+                case MessageType.DeckState:
+                {
+                    var msg = DeckStateMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => DeckPuppetDriver.OnDeckState(msg));
+                    break;
+                }
+
+                case MessageType.FlightOpsAnim:
+                {
+                    var msg = FlightOpsAnimMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => CarrierOpsHandler.HandleAnim(msg));
+                    break;
+                }
+
+                case MessageType.ImpactEvent:
+                {
+                    var msg = ImpactEventMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => SpawnReplicator.HandleImpact(msg));
+                    break;
+                }
+
+                case MessageType.DestroyEvent:
+                {
+                    var msg = DestroyEventMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => SpawnReplicator.HandleDestroyEvent(msg));
+                    break;
+                }
+
+                case MessageType.GunBurstEvent:
+                {
+                    var msg = GunBurstEventMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => CosmeticEventHandler.HandleGunBurst(msg));
+                    break;
+                }
+
+                case MessageType.AmmoStateEvent:
+                {
+                    var msg = AmmoStateEventMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => CosmeticEventHandler.HandleAmmoState(msg));
+                    break;
+                }
+
+                case MessageType.EntityCensus:
+                {
+                    var msg = EntityCensusMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => EntityCensusManager.HandleCensus(msg));
+                    break;
+                }
+
+                case MessageType.CensusDiffRequest:
+                {
+                    var msg = CensusDiffRequestMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => EntityCensusManager.HandleDiffRequest(msg));
                     break;
                 }
 
                 case MessageType.PlayerOrder:
                 {
                     var msg = PlayerOrderMessage.Deserialize(reader);
-                    long enqueueMs = AIAutoFireState.DiagMs;
-                    if (msg.Order == Messages.OrderType.AutoFireWeapon)
-                    {
-                        if (Plugin.Instance.CfgVerboseDebug.Value)
-                            Log.LogDebug($"[AutoFire DIAG] t={enqueueMs}ms ENQUEUE (bg thread) " +
-                                $"unit={msg.SourceEntityId} ammo={msg.AmmoId} target={msg.TargetEntityId} " +
-                                $"shots={msg.ShotsToFire}");
-                    }
-                    _mainThreadQueue.Enqueue(() =>
-                    {
-                        if (msg.Order == Messages.OrderType.AutoFireWeapon)
-                        {
-                            long applyMs = AIAutoFireState.DiagMs;
-                            if (Plugin.Instance.CfgVerboseDebug.Value)
-                                Log.LogDebug($"[AutoFire DIAG] t={applyMs}ms DEQUEUE (main thread, " +
-                                    $"waited {applyMs - enqueueMs}ms) unit={msg.SourceEntityId} ammo={msg.AmmoId}");
-                        }
-                        OrderHandler.Apply(msg);
-                    });
+                    _mainThreadQueue.Enqueue(() => OrderHandler.Apply(msg));
                     break;
                 }
 
@@ -251,14 +391,6 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
-                case MessageType.CombatEvent:
-                {
-                    var msg = CombatEventMessage.Deserialize(reader);
-                    Log.LogDebug($"[Net] Deserialized CombatEvent: {msg.EventType} target={msg.TargetEntityId} source={msg.SourceEntityId}");
-                    _mainThreadQueue.Enqueue(() => CombatEventHandler.Apply(msg));
-                    break;
-                }
-
                 case MessageType.DamageState:
                 {
                     var msg = DamageStateMessage.Deserialize(reader);
@@ -274,72 +406,91 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
-                case MessageType.ProjectileSpawn:
-                {
-                    var msg = ProjectileSpawnMessage.Deserialize(reader);
-                    // In co-op, only the host spawns projectiles and only the client
-                    // should receive these messages. If the host receives one (e.g.
-                    // from a client running a stale/mismatched PvP config) dropping
-                    // it here prevents the ForceSpawn→Postfix→broadcast feedback
-                    // loop that produces infinite interceptors.
-                    if (Plugin.Instance.CfgIsHost.Value && !Plugin.Instance.CfgPvP.Value)
-                    {
-                        Plugin.Log.LogWarning($"[Net] Dropping unexpected ProjectileSpawn on co-op host (source unit {msg.SourceUnitId}, ammo={msg.AmmoName})");
-                        break;
-                    }
-                    _mainThreadQueue.Enqueue(() => ProjectileIdMapper.OnHostSpawnReceived(
-                        msg.HostProjectileId, msg.SourceUnitId, msg.AmmoName,
-                        msg.TargetEntityId, msg.TargetX, msg.TargetY, msg.TargetZ,
-                        msg.LaunchDirX, msg.LaunchDirY, msg.LaunchDirZ));
-                    break;
-                }
-
-                case MessageType.FlightOps:
-                {
-                    var msg = FlightOpsMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => FlightOpsHandler.Apply(msg));
-                    break;
-                }
-
-                case MessageType.MissileStateSync:
-                {
-                    var msg = MissileStateSyncMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => MissileStateSyncHandler.Apply(msg));
-                    break;
-                }
-
-                case MessageType.ChaffLaunch:
-                {
-                    var msg = ChaffLaunchMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => Patch_ObjectBase_LaunchChaff.ApplyFromNetwork(msg));
-                    break;
-                }
-
-                case MessageType.AircraftRecoveryRequest:
-                {
-                    var msg = AircraftRecoveryRequestMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => FlightOpsHandler.HandleRecoveryRequest(msg));
-                    break;
-                }
-
-                case MessageType.AircraftRecoveryResponse:
-                {
-                    var msg = AircraftRecoveryResponseMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => FlightOpsHandler.HandleRecoveryResponse(msg));
-                    break;
-                }
-
-                case MessageType.ProjectileReconciliation:
-                {
-                    var msg = ProjectileReconciliationMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => ProjectileIdMapper.OnReconciliationReceived(msg));
-                    break;
-                }
-
                 default:
                     Log.LogWarning($"[Net] Unknown message type: {type}");
                     break;
             }
+        }
+
+        // ── v2 handshake ──────────────────────────────────────────────────────────
+
+        private void HandlePreHandshake(MessageType type, NetDataReader reader)
+        {
+            // No synchronous _handshake check here: OnPeerConnected QUEUES the
+            // AwaitingHello/AwaitingWelcome transition, so when the peer's Hello
+            // arrives in the same Poll batch as the connect event (host frame
+            // hitch during boot, localhost RTT) the state still reads
+            // Disconnected and the Hello would be dropped - both sides then sit
+            // out the 5 s timeout. Enqueue the handler instead; FIFO order puts
+            // it after the state transition, and HandleHello/HandleWelcome do
+            // the authoritative state check on the main thread.
+            if (type == MessageType.Hello && _isHost)
+            {
+                var msg = HelloMessage.Deserialize(reader);
+                _mainThreadQueue.Enqueue(() => HandleHello(msg));
+            }
+            else if (type == MessageType.Welcome && !_isHost)
+            {
+                var msg = WelcomeMessage.Deserialize(reader);
+                _mainThreadQueue.Enqueue(() => HandleWelcome(msg));
+            }
+            else
+            {
+                Telemetry.Count("net.droppedPreHandshake");
+                Log.LogDebug($"[Handshake] Dropped {type} (state={_handshake})");
+            }
+        }
+
+        private void HandleHello(HelloMessage msg)
+        {
+            if (_handshake != HandshakeState.AwaitingHello) return;
+
+            string? refusal = null;
+            if (msg.ProtocolVersion != ProtocolInfo.ProtocolVersion)
+                refusal = $"Protocol mismatch: host v{ProtocolInfo.ProtocolVersion}, client v{msg.ProtocolVersion}. Both players need the same mod version.";
+            else if (msg.IsPvP != Plugin.Instance.CfgPvP.Value)
+                refusal = $"Mode mismatch: host is {(Plugin.Instance.CfgPvP.Value ? "PvP" : "co-op")}, client is {(msg.IsPvP ? "PvP" : "co-op")}.";
+
+            if (refusal != null)
+            {
+                Log.LogError($"[Handshake] Refusing client (plugin {msg.PluginVersion}): {refusal}");
+                Telemetry.Count("handshake.refused");
+                BroadcastToClients(new WelcomeMessage { Accepted = false, RefusalReason = refusal });
+                _handshake = HandshakeState.Refused;
+                _handshakeDeadline = -1f;
+                _refuseDisconnectAt = Time.realtimeSinceStartup + 0.75f;
+                return;
+            }
+
+            _handshake = HandshakeState.Established;
+            _handshakeDeadline = -1f;
+            BroadcastToClients(new WelcomeMessage
+            {
+                Accepted      = true,
+                IsPvP         = Plugin.Instance.CfgPvP.Value,
+                ClientUidBase = ProtocolInfo.ClientUidBase,
+                StateRateHz   = 10,
+            });
+            Log.LogInfo($"[Handshake] Client accepted (plugin {msg.PluginVersion}, protocol {msg.ProtocolVersion}). Established.");
+        }
+
+        private void HandleWelcome(WelcomeMessage msg)
+        {
+            if (_handshake != HandshakeState.AwaitingWelcome) return;
+            _handshakeDeadline = -1f;
+
+            if (!msg.Accepted)
+            {
+                Log.LogError($"[Handshake] Host refused connection: {msg.RefusalReason}");
+                Telemetry.Count("handshake.refused");
+                _handshake = HandshakeState.Refused;
+                Stop();
+                return;
+            }
+
+            SessionParams = msg;
+            _handshake = HandshakeState.Established;
+            Log.LogInfo($"[Handshake] Established (pvp={msg.IsPvP}, uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz).");
         }
     }
 }

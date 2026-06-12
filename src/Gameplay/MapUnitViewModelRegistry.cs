@@ -7,7 +7,7 @@ namespace SeapowerMultiplayer
 {
     /// <summary>
     /// Tracks live MapUnitViewModel instances so UnitLockManager can push a
-    /// PropertyChanged notification when the remote player's lock changes —
+    /// PropertyChanged notification when the remote player's lock changes -
     /// the map unit label re-reads <see cref="MapUnitViewModel.ContactInfoLine2"/>
     /// and renders the "[ALLY]" badge.
     /// </summary>

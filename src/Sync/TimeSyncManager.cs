@@ -216,7 +216,7 @@ namespace SeapowerMultiplayer
             if (param == 1f)  return "1x speed";
             if (param == -1f)
             {
-                // "increase" from current — estimate the next step
+                // "increase" from current - estimate the next step
                 float current = GameTime.TimeCompression;
                 return $"faster than {current:0.#}x";
             }
@@ -254,7 +254,7 @@ namespace SeapowerMultiplayer
                 if (newTimeScale == 0f)
                 {
                     Plugin.Log.LogInfo("[TimeSync] Client applying: Pause");
-                    GameTime.Pause(false); // don't mute sounds — client-side cosmetic only
+                    GameTime.Pause(false); // don't mute sounds - client-side cosmetic only
                 }
                 else
                 {
@@ -408,7 +408,7 @@ namespace SeapowerMultiplayer
         {
             static bool Prefix()
             {
-                // Pause is exempt from vote mode — always allowed
+                // Pause is exempt from vote mode - always allowed
                 bool isHost = Plugin.Instance.CfgIsHost.Value;
                 bool connected = NetworkManager.Instance.IsConnected;
                 Plugin.Log.LogInfo($"[TimeSync] Pause Prefix: isHost={isHost}, connected={connected}, applyingFromNet={_applyingFromNetwork}");
@@ -446,7 +446,7 @@ namespace SeapowerMultiplayer
         {
             static bool Prefix()
             {
-                // Unpause is exempt from vote mode — always allowed
+                // Unpause is exempt from vote mode - always allowed
                 bool isHost = Plugin.Instance.CfgIsHost.Value;
                 bool connected = NetworkManager.Instance.IsConnected;
                 Plugin.Log.LogInfo($"[TimeSync] StopTimeCompression Prefix: isHost={isHost}, connected={connected}, applyingFromNet={_applyingFromNetwork}");

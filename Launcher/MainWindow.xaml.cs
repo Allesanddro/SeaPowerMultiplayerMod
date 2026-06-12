@@ -117,6 +117,8 @@ namespace SeapowerMultiplayer.Launcher
             ChkAutoConnect.IsChecked = _config.Settings.AutoConnect;
             ChkTimeVote.IsChecked = _config.Settings.TimeVote;
             ChkPvP.IsChecked = _config.Settings.PvP;
+            TxtMissileHz.Text = _config.Settings.MissileStateHz.ToString();
+            TxtUnitHz.Text = _config.Settings.UnitStateHz.ToString();
             TxtHostIP.IsEnabled = !_config.Settings.IsHost;
         }
 
@@ -130,6 +132,10 @@ namespace SeapowerMultiplayer.Launcher
             _config.Settings.AutoConnect = ChkAutoConnect.IsChecked == true;
             _config.Settings.TimeVote = ChkTimeVote.IsChecked == true;
             _config.Settings.PvP = ChkPvP.IsChecked == true;
+            if (int.TryParse(TxtMissileHz.Text.Trim(), out int missileHz))
+                _config.Settings.MissileStateHz = Math.Clamp(missileHz, 1, 60);
+            if (int.TryParse(TxtUnitHz.Text.Trim(), out int unitHz))
+                _config.Settings.UnitStateHz = Math.Clamp(unitHz, 1, 60);
             _config.Save();
         }
 
@@ -160,7 +166,7 @@ namespace SeapowerMultiplayer.Launcher
             }
             else if (bepinex && !proxy)
             {
-                // BepInEx installed but proxy not stashed — needs repair
+                // BepInEx installed but proxy not stashed - needs repair
                 StatusDot.Fill = FindResource("WarningOrange") as System.Windows.Media.SolidColorBrush;
                 TxtInstallStatus.Text = "Needs repair (proxy not configured)";
                 BtnInstall.Content = "Repair";
@@ -279,7 +285,8 @@ namespace SeapowerMultiplayer.Launcher
         {
             if (BtnLaunch == null)
                 return;
-            if (IsValidIP(TxtHostIP.Text) && IsValidPort(TxtPort.Text))
+            if (IsValidIP(TxtHostIP.Text) && IsValidPort(TxtPort.Text)
+                && IsValidHz(TxtMissileHz.Text) && IsValidHz(TxtUnitHz.Text))
             {
                 BtnLaunch.IsEnabled = true;
                 TxtStatus.Text = "Ready";
@@ -289,6 +296,24 @@ namespace SeapowerMultiplayer.Launcher
                 BtnLaunch.IsEnabled = false;
                 TxtStatus.Text = "Invalid network configuration.";
             }
+        }
+
+        //State sync rates must be a whole number between 1 and 60
+        private bool IsValidHz(string entered)
+        {
+            return int.TryParse(entered.Trim(), out var hz) && hz >= 1 && hz <= 60;
+        }
+
+        //Update the border of the Hz boxes to indicate that something is invalid to the user
+        private void TxtHz_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.TextBox box)
+            {
+                box.BorderBrush = IsValidHz(box.Text)
+                    ? System.Windows.Media.Brushes.Green
+                    : System.Windows.Media.Brushes.Red;
+            }
+            ValidateNetworkSettings();
         }
         //Checks to make sure everything needed for the mod is where it should be
         private bool ValidInstall()
@@ -370,7 +395,7 @@ namespace SeapowerMultiplayer.Launcher
             }
         }
 
-        private const string CurrentVersion = "0.2.1";
+        private const string CurrentVersion = "0.3.0";
 
         private async void BtnLaunch_Click(object sender, RoutedEventArgs e)
         {
@@ -434,6 +459,8 @@ namespace SeapowerMultiplayer.Launcher
             ChkAutoConnect.IsEnabled = enabled;
             ChkTimeVote.IsEnabled = enabled;
             ChkPvP.IsEnabled = enabled;
+            TxtMissileHz.IsEnabled = enabled;
+            TxtUnitHz.IsEnabled = enabled;
         }
 
         

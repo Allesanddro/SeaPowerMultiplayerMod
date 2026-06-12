@@ -73,9 +73,9 @@ namespace SeapowerMultiplayer.Launcher.Services
                     }
 
                     if (gameProc == null)
-                        break; // No new process appeared — game is truly closed
+                        break; // No new process appeared - game is truly closed
 
-                    // A restarted process was found — wait for it to exit
+                    // A restarted process was found - wait for it to exit
                     await Task.Run(() => gameProc.WaitForExit());
                     gameProc.Dispose();
                 }
