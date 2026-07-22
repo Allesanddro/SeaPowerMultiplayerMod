@@ -54,6 +54,8 @@ namespace SeapowerMultiplayer
 
         public bool LastSendFailed => _transport?.LastSendFailed ?? false;
 
+        public string? LastSendError => _transport?.LastSendError;
+
         public bool IsConnectedClient => !_isHost && IsConnected;
 
         public bool IsHost => _isHost;
@@ -214,6 +216,10 @@ namespace SeapowerMultiplayer
             Log.LogInfo("[Net] Peer connected");
             _mainThreadQueue.Enqueue(() =>
             {
+                // A new peer means a new attempt - don't carry a stale failure
+                // banner from the previous session into this one.
+                SimSyncManager.ClearIssue();
+
                 if (_isHost)
                 {
                     _handshake = HandshakeState.AwaitingHello;
@@ -249,11 +255,14 @@ namespace SeapowerMultiplayer
                 AircraftReplicaDriver.Reset();
                 DeckPuppetDriver.Reset();
                 CarrierOpsHandler.Reset();
+                WeaponHatchHandler.Reset();
+                FlightDeckStreamer.Reset();
                 SpawnReplicator.Reset();
                 WeaponReplicaDriver.Reset();
                 EntityCensusManager.Reset();
                 Patch_V2_MissionEnd_Capture.Reset();
                 CaptureState.Clear();
+                HatchStateCapture.Clear();
                 ReplicaRegistry.Clear();
                 Suppression.EnforceDefenseFlag(); // restores client auto-defence
                 TaskforceAssignmentManager.Reset();
@@ -261,7 +270,7 @@ namespace SeapowerMultiplayer
                 StateApplier.ResetOrphanTracking();
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
-                Patch_Compartments_CalculateWantedVelocityInKnots.ClearLogCache();
+                Patch_Compartments_UpdateWantedVelocityInKnots.ClearLogCache();
                 Patch_Vessel_ApplyRudderThrust.ClearLogCache();
                 Patch_VesselPropulsionSystem_OnUpdate.ClearLogCache();
             });
@@ -318,6 +327,20 @@ namespace SeapowerMultiplayer
                 {
                     var msg = FlightOpsAnimMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => CarrierOpsHandler.HandleAnim(msg));
+                    break;
+                }
+
+                case MessageType.WeaponHatchEvent:
+                {
+                    var msg = WeaponHatchEventMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => WeaponHatchHandler.Handle(msg));
+                    break;
+                }
+
+                case MessageType.FlightDeckState:
+                {
+                    var msg = FlightDeckStateMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => FlightDeckStateApplier.Apply(msg));
                     break;
                 }
 

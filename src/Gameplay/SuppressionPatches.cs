@@ -34,6 +34,24 @@ namespace SeapowerMultiplayer
             && unit._taskforce != null
             && unit._taskforce == Globals._enemyTaskforce;
 
+        /// <summary>CLIENT-side: true for a unit the local player does not own -
+        /// the opposing side in PvP, the AI sides in co-op. The per-unit AI class
+        /// is suppressed on the client, but Vessel/Submarine tick their OWN state
+        /// machines outside it, so those units still make local decisions. Those
+        /// decisions must neither execute locally nor travel upstream as if the
+        /// player had made them. (Without this the client's submarine AI drove
+        /// the Sprint state on the host player's sub replica - preset depth 5 +
+        /// AI transit telegraph - and the order patches forwarded both to the
+        /// host, which applied them: depth pinned deep, speed pinned to ~20 kts,
+        /// course still free because rudder is not an order.)</summary>
+        internal static bool ClientForeignUnit(ObjectBase? unit) =>
+            ClientActive
+            && !OrderHandler.ApplyingFromNetwork
+            && !Authority.IsAllowed
+            && unit != null
+            && unit._taskforce != null
+            && unit._taskforce != Globals._playerTaskforce;
+
         private static bool _defenseFlagForced;
 
         /// <summary>Master auto-defence kill switch: gates CIWS acquisition,
@@ -63,6 +81,18 @@ namespace SeapowerMultiplayer
                 Plugin.Log.LogInfo("[Suppression] Client auto-defence restored");
             }
         }
+    }
+
+    /// <summary>Client carriers are puppets - the host owns all flight-deck ops.
+    /// Suppress the deck task pump so the pending-launch queue the client mirrors
+    /// from the host's FlightDeckState snapshot (FlightDeckStateApplier) stays
+    /// display-only and never advances or spawns aircraft locally.</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_FlightDeckTasks_Suppress
+    {
+        static System.Reflection.MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(FlightDeck), "handleFlightDeckTasks");
+        static bool Prefix() => !Suppression.ClientActive;
     }
 
     /// <summary>Master per-unit AI kill on the client (auto-engage, carrier ops,

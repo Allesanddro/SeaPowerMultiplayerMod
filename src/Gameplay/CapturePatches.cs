@@ -350,6 +350,54 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // ── Weapon hatches: VLS lids / torpedo-tube doors ────────────────────────
+
+    /// <summary>VLS/torpedo-tube hatch open/close → cosmetic event. The launcher
+    /// calls openHatches() every frame while the lid animates, so dedup per
+    /// (unit, mount, container): only the open↔close transitions cross the wire.</summary>
+    public static class HatchStateCapture
+    {
+        private static readonly Dictionary<(int unit, int mount, int container), bool> _lastOpen = new();
+        internal static void Clear() => _lastOpen.Clear();
+
+        internal static void OnHatch(WeaponSystemLauncher launcher, int containerId, bool open)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            var unit = launcher._baseObject;
+            if (unit == null) return;
+            int mountIdx = CaptureState.MountIndexOf(unit, launcher);
+            if (mountIdx < 0 || containerId < 0 || containerId > 255) return;
+
+            var key = (unit.UniqueID, mountIdx, containerId);
+            bool prev = _lastOpen.TryGetValue(key, out bool p) && p;
+            if (prev == open) return; // no transition (also skips a close with no prior open)
+            _lastOpen[key] = open;
+
+            NetworkManager.Instance.BroadcastToClients(new WeaponHatchEventMessage
+            {
+                UnitId      = unit.UniqueID,
+                MountIndex  = (short)mountIdx,
+                ContainerId = (byte)containerId,
+                Open        = open,
+            });
+            Telemetry.Count("v2.capturedHatch");
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.openHatches), new[] { typeof(int) })]
+    public static class Patch_V2_OpenHatches_Capture
+    {
+        static void Postfix(WeaponSystemLauncher __instance, int containerId)
+            => HatchStateCapture.OnHatch(__instance, containerId, true);
+    }
+
+    [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.closeHatches), new[] { typeof(int), typeof(float) })]
+    public static class Patch_V2_CloseHatches_Capture
+    {
+        static void Postfix(WeaponSystemLauncher __instance, int containerId)
+            => HatchStateCapture.OnHatch(__instance, containerId, false);
+    }
+
     /// <summary>Magazine expenditure → throttled authoritative count sync.</summary>
     public static class AmmoStateCapture
     {

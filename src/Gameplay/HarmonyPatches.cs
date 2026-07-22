@@ -47,20 +47,25 @@ namespace SeapowerMultiplayer
     // guards let physics run normally once the values are initialised.
     // NO blanket host-only suppressions - the client runs full local physics.
 
-    [HarmonyPatch(typeof(Compartments), "CalculateWantedVelocityInKnots")]
-    public static class Patch_Compartments_CalculateWantedVelocityInKnots
+    [HarmonyPatch(typeof(Compartments), "UpdateWantedVelocityInKnots")]
+    public static class Patch_Compartments_UpdateWantedVelocityInKnots
     {
         private static readonly HashSet<int> _loggedIds = new();
         internal static void ClearLogCache() => _loggedIds.Clear();
 
-        static bool Prefix(Compartments __instance, ref float __result)
+        // WantedVelocityInKnots has a private setter; skipping the method would
+        // otherwise leave the previous frame's value in place.
+        private static readonly MethodInfo _wantedVelocitySetter =
+            AccessTools.PropertySetter(typeof(Compartments), nameof(Compartments.WantedVelocityInKnots));
+
+        static bool Prefix(Compartments __instance)
         {
             if (__instance._baseObject?.SpeedCommand?.Value == null)
             {
                 int id = __instance._baseObject?.UniqueID ?? -1;
                 if (_loggedIds.Add(id))
                     Plugin.Log.LogWarning($"[Physics] SpeedCommand.Value is NULL for entity {id} — returning speed=0 (this blocks movement)");
-                __result = 0f;
+                _wantedVelocitySetter.Invoke(__instance, new object[] { 0f });
                 return false;
             }
             return true;
@@ -266,17 +271,20 @@ namespace SeapowerMultiplayer
         }
     }
 
-    /// <summary>Host PvP: setPresetDepth writes DesiredAltitude DIRECTLY before
-    /// calling setDepth, so AI preset-depth calls bypass the setDepth owner-guard.
-    /// Block local preset changes on the remote player's subs outright - their
-    /// depth orders arrive as raw SetDepth and don't go through presets.</summary>
+    /// <summary>setPresetDepth writes DesiredAltitude DIRECTLY before calling
+    /// setDepth, so AI preset-depth calls bypass the setDepth owner-guard. Block
+    /// local preset changes outright on subs the local player doesn't command:
+    /// host-side the remote player's subs (their depth orders arrive as raw
+    /// SetDepth and don't go through presets), client-side every host-driven
+    /// replica (whose depth comes down the state stream).</summary>
     [HarmonyPatch(typeof(Submarine), nameof(Submarine.setPresetDepth))]
-    public static class Patch_Submarine_SetPresetDepth_RemoteTf
+    public static class Patch_Submarine_SetPresetDepth_Guard
     {
         static bool Prefix(Submarine __instance, ref int __result)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
-            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return true;
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)
+                && !Suppression.ClientForeignUnit(__instance)) return true;
             __result = __instance._currentPresetDepth;
             return false;
         }
@@ -290,6 +298,63 @@ namespace SeapowerMultiplayer
     // waypoints + StateApplier position/heading corrections.
     // Also: SetRudderToHeading() writes _setRudderAngle directly, bypassing
     // setRudderAngle(), so the patch never caught normal autopilot steering anyway.
+
+
+    // ── Manual rudder (A/D "hard left / hard right") ────────────────────────
+    //
+    // The autopilot path above is deliberately NOT synced, but the player's manual
+    // rudder is a discrete order and has to be: under host authority the client's
+    // ship is driven entirely by the host's stream (UnitReplicaDriver mirrors the
+    // host's rudder and lerps heading 10x/s), so a client-side rudder keypress was
+    // overwritten within ~100 ms and never reached the host at all - the client
+    // simply could not steer, and the host saw none of their turns.
+    //
+    // Hooked at turnRudderLeft/Right (the only callers are InputHandler's A/D keys)
+    // rather than setRudderAngle, so autopilot steering stays local. Vessel and
+    // Submarine each declare their own copies of these methods.
+
+    static class RudderSync
+    {
+        internal static PlayerOrderMessage Msg(ObjectBase u) => new PlayerOrderMessage
+        {
+            SourceEntityId = u.UniqueID,
+            Order          = OrderType.SetRudder,
+            Speed          = StateSerializer.GetRudderAngle(u),
+        };
+
+        /// <summary>Postfix, not prefix: the angle is a step relative to the current
+        /// one, so it's only known after the method body has run.</summary>
+        internal static void Sync(ObjectBase unit)
+        {
+            var msg = Msg(unit);
+            if (OrderSyncHelper.Prefix(unit, msg))
+                OrderSyncHelper.Postfix(unit, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Vessel), nameof(Vessel.turnRudderLeft))]
+    public static class Patch_Vessel_TurnRudderLeft
+    {
+        static void Postfix(Vessel __instance) => RudderSync.Sync(__instance);
+    }
+
+    [HarmonyPatch(typeof(Vessel), nameof(Vessel.turnRudderRight))]
+    public static class Patch_Vessel_TurnRudderRight
+    {
+        static void Postfix(Vessel __instance) => RudderSync.Sync(__instance);
+    }
+
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.turnRudderLeft))]
+    public static class Patch_Submarine_TurnRudderLeft
+    {
+        static void Postfix(Submarine __instance) => RudderSync.Sync(__instance);
+    }
+
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.turnRudderRight))]
+    public static class Patch_Submarine_TurnRudderRight
+    {
+        static void Postfix(Submarine __instance) => RudderSync.Sync(__instance);
+    }
 
 
     // ── Waypoint intercept (bidirectional) ──────────────────────────────────
@@ -566,6 +631,36 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // ── FlightDeck.abortLaunchTask: client → host ───────────────────────────
+    //
+    // The client's Flight Ops queue mirrors the host's (FlightDeckStateApplier), and
+    // each display task carries the host's task Guid. Its Abort button calls
+    // abortLaunchTask with that Guid - forward it upstream so the host actually
+    // cancels the pending launch. The cancellation (task removed, stores/availability
+    // restored) returns through the next FlightDeckState snapshot.
+    [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.abortLaunchTask))]
+    public static class Patch_FlightDeck_AbortLaunchTask
+    {
+        static bool Prefix(FlightDeck __instance, System.Guid uid)
+        {
+            if (!Suppression.ClientActive) return true;        // host / offline: native
+            if (OrderHandler.ApplyingFromNetwork) return true; // (safety - not used client-side)
+
+            var carrier = __instance._baseObject;
+            if (carrier == null) return false;
+
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = carrier.UniqueID,
+                Order          = OrderType.AbortLaunch,
+                AmmoId         = uid.ToString(),
+            });
+            Telemetry.Count("v2.clientAbortLaunchUpstream");
+            Plugin.Log.LogInfo($"[FlightOps] Upstream abort launch: carrier={carrier.UniqueID} uid={uid}");
+            return false;
+        }
+    }
+
 
     // ── Host-authoritative AI weapon fire ──────────────────────────────────
 
@@ -695,8 +790,9 @@ namespace SeapowerMultiplayer
         // the JIT inlines into its callers, so a Harmony prefix on it never runs
         // (verified live - fire orders died silently there).
         //
-        // Known gap (same inlining reason): direct AddEngageTask call sites
-        // (AttackTask bearing-only attacks, DropSonobuoyTask) bypass this.
+        // AttackTask bearing-only attacks also call AddEngageTask directly (inlined)
+        // and are forwarded separately via Patch_V2_AttackTask_BearingFire below.
+        // Known remaining gap (same inlining reason): DropSonobuoyTask bypasses this.
 
         static bool Prefix(ObjectBase __instance, ref EngageTask __result,
                            string ammoId, ObjectBase targetObject, Vector3 targetPosition,
@@ -748,7 +844,7 @@ namespace SeapowerMultiplayer
 
         /// <summary>Client → host fire order (pure upstream - the replica weapon
         /// returns via EntitySpawn ~RTT later, masked by launch sequencing).</summary>
-        private static void SendClientFireOrder(ObjectBase unit, string ammoId,
+        internal static void SendClientFireOrder(ObjectBase unit, string ammoId,
             ObjectBase targetObject, Vector3 targetPosition, int shotsToFire)
         {
             bool isSonobuoy = ammoId != null
@@ -797,6 +893,103 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // ── Bearing-only manual fire (client → host) ───────────────────────────
+    //
+    // AttackTask.OnExecute is the player's manual attack order. A TARGETED attack
+    // calls InsertEngageTask (hooked above), but a BEARING-only attack (no target -
+    // torpedo/missile/bomb fired down a bearing) calls AddEngageTask directly, which
+    // the JIT inlines, so it slips past the InsertEngageTask hook and never reaches
+    // the host (fires for neither side). Catch it at the un-inlined OnExecute: forward
+    // the shot upstream and drop the local engage task. The host owns the launch; the
+    // weapon returns as a replica via EntitySpawn. Targeted attacks are skipped here
+    // (already handled by InsertEngageTask) to avoid double-firing.
+    [HarmonyPatch(typeof(AttackTask), "OnExecute")]
+    public static class Patch_V2_AttackTask_BearingFire
+    {
+        static void Prefix(AttackTask __instance, ObjectBase ____baseObject, ref int __state)
+        {
+            __state = -1;
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (!NetworkManager.Instance.IsEstablished) return;
+            if (SessionManager.SceneLoading) return;
+            if (Plugin.Instance.CfgIsHost.Value) return;
+
+            // Targeted attacks route through InsertEngageTask; only bearing-only
+            // fire reaches the inlined AddEngageTask path below in OnExecute.
+            if (__instance.targetObject?.value != null) return;
+
+            var unit = ____baseObject;
+            if (unit == null) return;
+            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return;
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return;
+
+            string ammo = __instance.ammunitionForEngage?.value;
+            int salvo   = __instance.salvo?.value ?? 1;
+            Vector3 targetPos = Utils.longLatToLocalV3(__instance.bearingPosition.value, Globals._currentCenterTile);
+
+            Patch_ObjectBase_InsertEngageTask.SendClientFireOrder(unit, ammo, null, targetPos, salvo);
+
+            // Let OnExecute run for the voice/order-log + finish() (so the behaviour
+            // tree node completes), then strip the task it appended in the postfix.
+            __state = unit._currentEngageTasks.Count;
+        }
+
+        static void Postfix(ObjectBase ____baseObject, int __state)
+        {
+            if (__state < 0 || ____baseObject == null) return;
+            var tasks = ____baseObject._currentEngageTasks;
+            for (int i = tasks.Count - 1; i >= __state; i--)
+                tasks.RemoveAt(i);
+        }
+    }
+
+    // ── Sonobuoy drop via DropSonobuoyTask (client → host) ──────────────────
+    //
+    // DropSonobuoyTask.OnExecute also calls the inlined AddEngageTask directly, but
+    // on a DIFFERENT method than AttackTask.OnExecute, so the bearing-fire hook above
+    // never covers it (flagged gap). The player's normal sonobuoy drops route through
+    // AttackTask (covered); this closes the Order.Type.DropSonobuoy task path so any
+    // client-issued sonobuoy drop is forwarded too. Same shape as the AttackTask hook
+    // - forward the drop, let OnExecute run for the order-log/finish(), then strip the
+    // locally-appended task. Unlike AttackTask, this path never uses InsertEngageTask
+    // for targeted drops either, so we forward both targeted and bearing cases. The
+    // host owns the real drop, which replicates back as a LiveLocal sonobuoy.
+    [HarmonyPatch(typeof(DropSonobuoyTask), "OnExecute")]
+    public static class Patch_V2_DropSonobuoyTask_Fire
+    {
+        static void Prefix(DropSonobuoyTask __instance, ObjectBase ____baseObject, ref int __state)
+        {
+            __state = -1;
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (!NetworkManager.Instance.IsEstablished) return;
+            if (SessionManager.SceneLoading) return;
+            if (Plugin.Instance.CfgIsHost.Value) return;
+
+            var unit = ____baseObject;
+            if (unit == null) return;
+            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return;
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return;
+
+            string ammo = __instance.AmmunitionType?.value;
+            var target  = __instance._targetObject?.value;
+            Vector3 pos = target != null
+                ? target.transform.position
+                : Utils.longLatToLocalV3(__instance._bearingPosition.value, Globals._currentCenterTile);
+
+            Patch_ObjectBase_InsertEngageTask.SendClientFireOrder(unit, ammo, target, pos, 1);
+
+            __state = unit._currentEngageTasks.Count;
+        }
+
+        static void Postfix(ObjectBase ____baseObject, int __state)
+        {
+            if (__state < 0 || ____baseObject == null) return;
+            var tasks = ____baseObject._currentEngageTasks;
+            for (int i = tasks.Count - 1; i >= __state; i--)
+                tasks.RemoveAt(i);
+        }
+    }
+
     // ── Phase 3: Additional command replication ─────────────────────────────
 
     [HarmonyPatch(typeof(Submarine), nameof(Submarine.setDepth))]
@@ -842,6 +1035,10 @@ namespace SeapowerMultiplayer
 
             if (SessionManager.SceneLoading) return true;
             if (!NetworkManager.Instance.IsConnected) return true;
+
+            // Client: never let our local sim re-depth a host-driven replica, and
+            // never forward that decision to the host as a player order.
+            if (Suppression.ClientForeignUnit(__instance)) return false;
 
             // Co-op: block UI depth changes on units locked by remote player
             if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
@@ -973,6 +1170,10 @@ namespace SeapowerMultiplayer
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (SessionManager.SceneLoading) return true; // don't send during scene load
+            // Client: units we don't own are host-driven replicas. An order reaching
+            // here for one came from our own local sim (unit state machines tick
+            // outside the suppressed AI class) - block it locally AND upstream.
+            if (Suppression.ClientForeignUnit(unit)) return false;
             // Co-op: block UI orders for units the remote player has selected (ally lock).
             // ApplyingFromNetwork above ensures network-applied orders still execute.
             if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
@@ -1082,7 +1283,6 @@ namespace SeapowerMultiplayer
         private static float GetMinInterval(OrderType order) => order switch
         {
             OrderType.SensorToggle    => 10f,
-            OrderType.RemoveWaypoints => 2f,
             OrderType.DeleteWaypoint  => 1f,
             OrderType.SetSpeed        => 0.5f,
             OrderType.SetEMCON        => 10f,
@@ -1104,6 +1304,17 @@ namespace SeapowerMultiplayer
                 case OrderType.SetAltitude:
                 case OrderType.ReturnToBase:
                 case OrderType.ClassifyContact:
+                // RemoveWaypoints is a discrete, repeatable clear-all command. Its
+                // fingerprint is constant (Speed=Heading=0), so value-dedup would
+                // permanently suppress every clear after the first per unit - leaving
+                // stale waypoints on the host when the player right-clicks to replace
+                // a route. Always forward it (player-driven on the client; only fired
+                // on AI transitions host-side, so no per-frame flood).
+                case OrderType.RemoveWaypoints:
+                // SetRudder is a discrete keypress step, already rate-limited by the
+                // game to one per 0.5 s. Value-dedup would suppress a repeat of an
+                // angle the other side's autopilot has since moved off.
+                case OrderType.SetRudder:
                     return true;
             }
 
@@ -1459,6 +1670,53 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // ── Manual noisemaker deployment (Shift+D) ──────────────────────────────
+    //
+    // Unlike chaff, the manual noisemaker has no clean ObjectBase method to hook:
+    // InputHandler.OnUpdate queues a noisemaker EngageTask via AddEngageTask (a
+    // one-line method the JIT inlines, so it can't be patched), which also bypasses
+    // the InsertEngageTask fire-order sync. The client never runs the firing
+    // pipeline either (HandleEngageTasks is host-only), so that queued task is inert
+    // - the client's manual noisemaker never reached the host. Mirror chaff: detect
+    // the keypress here and forward a discrete LaunchNoisemaker order. The host runs
+    // it natively (launchNoisemaker → real decoy → captured → replicated back as a
+    // spawn). The host's own Shift+D already fires natively, so it needs no forward.
+    [HarmonyPatch(typeof(InputHandler), nameof(InputHandler.OnUpdate))]
+    public static class Patch_InputHandler_NoisemakerUpstream
+    {
+        static void Postfix(InputHandler __instance)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (!NetworkManager.Instance.IsEstablished) return;
+            if (Plugin.Instance.CfgIsHost.Value) return; // host launches natively
+            if (!__instance.getKeyDown(KeyAction.LaunchNoisemaker)) return;
+
+            var unit = Singleton<RenderPosition>.InstanceExists()
+                ? Singleton<RenderPosition>.Instance.getSelectedObject() : null;
+            if (unit == null || !unit.isUnit() || !unit.AcceptsOrdersFromPlayer) return;
+            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return;
+            if (!HasAvailableNoisemaker(unit)) return; // host launchNoisemaker would no-op
+
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = unit.UniqueID,
+                Order          = OrderType.LaunchNoisemaker,
+            });
+            Telemetry.Count("v2.clientNoisemakerUpstream");
+        }
+
+        static bool HasAvailableNoisemaker(ObjectBase unit)
+        {
+            foreach (var kv in unit.AmmunitionAmountDictionary)
+            {
+                if (kv.Value < 1) continue;
+                var ammo = unit.getAmmunitionByName(kv.Key);
+                if (ammo != null && ammo._ap._type == Ammunition.Type.Noisemaker) return true;
+            }
+            return false;
+        }
+    }
+
     // ── PvP: fix map colors and formation markers ────────────────────────
     //
     // After side swap, the ECS DetectedSide component still references the
@@ -1735,40 +1993,79 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.setPresetHeight))]
     public static class Patch_Aircraft_SetPresetHeight
     {
-        static void Postfix(Aircraft __instance, int preset, bool updateAltForWaypoints)
+        static PlayerOrderMessage Msg(ObjectBase u, int preset, bool updateAlt) => new PlayerOrderMessage
         {
-            if (OrderHandler.ApplyingFromNetwork) return;
-            if (SessionManager.SceneLoading) return;
+            SourceEntityId = u.UniqueID,
+            Order          = OrderType.SetAltitude,
+            Speed          = (float)preset,
+            Heading        = updateAlt ? 1f : 0f,
+        };
 
-            var msg = new PlayerOrderMessage
-            {
-                SourceEntityId = __instance.UniqueID,
-                Order          = OrderType.SetAltitude,
-                Speed          = (float)preset,
-                Heading        = updateAltForWaypoints ? 1f : 0f,
-            };
+        static bool Prefix(Aircraft __instance, int preset, bool updateAltForWaypoints) =>
+            OrderSyncHelper.Prefix(__instance, Msg(__instance, preset, updateAltForWaypoints));
 
-            OrderSyncHelper.Postfix(__instance, msg);
-        }
+        static void Postfix(Aircraft __instance, int preset, bool updateAltForWaypoints) =>
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, preset, updateAltForWaypoints));
     }
 
     [HarmonyPatch(typeof(Helicopter), nameof(Helicopter.setPresetHeight))]
     public static class Patch_Helicopter_SetPresetHeight
     {
-        static void Postfix(Helicopter __instance, int preset, bool updateAltForWaypoints)
+        static PlayerOrderMessage Msg(ObjectBase u, int preset, bool updateAlt) => new PlayerOrderMessage
         {
-            if (OrderHandler.ApplyingFromNetwork) return;
-            if (SessionManager.SceneLoading) return;
+            SourceEntityId = u.UniqueID,
+            Order          = OrderType.SetAltitude,
+            Speed          = (float)preset,
+            Heading        = updateAlt ? 1f : 0f,
+        };
 
+        static bool Prefix(Helicopter __instance, int preset, bool updateAltForWaypoints) =>
+            OrderSyncHelper.Prefix(__instance, Msg(__instance, preset, updateAltForWaypoints));
+
+        static void Postfix(Helicopter __instance, int preset, bool updateAltForWaypoints) =>
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, preset, updateAltForWaypoints));
+    }
+
+    // ── Fixed-wing aircraft speed (client → host) ────────────────────────────
+    //
+    // Aircraft is an ObjectBase, NOT a Vessel, so Patch_Vessel_SetTelegraph never
+    // intercepts it. The fixed-wing speed context menu (ObjectSpeed) also bypasses
+    // setTelegraph entirely - it calls SetSpeedCommand(new ConstantMach(...)) with a
+    // value taken straight from Ap._speedValuesInMach. We hook SetSpeedCommand,
+    // recover the preset index by matching that mach value, and forward it as a
+    // SetSpeed order so the client can command its own aircraft's speed.
+    //
+    // Client-only: on the host the player's change flows back to the client through
+    // the 10 Hz entity stream (Telegraph/velocity), so no host broadcast is needed -
+    // and the host's AI calls SetSpeedCommand every tick, which we must not echo.
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.SetSpeedCommand))]
+    public static class Patch_Aircraft_SetSpeedCommand
+    {
+        static bool Prefix(ObjectBase __instance, ISpeedCommand speedCommand)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true; // host: stream carries aircraft speed
+            if (SessionManager.SceneLoading) return true;
+            if (!(__instance is Aircraft ac)) return true;
+            if (!(speedCommand is ConstantMach cm)) return true;
+
+            var speeds = ac.Ap?._speedValuesInMach;
+            if (speeds == null) return true;
+
+            int idx = Array.IndexOf(speeds, cm.SpeedInMach);
+            if (idx < 0) return true; // not a player preset (AI/continuous value) - don't sync
+
+            // Host applies via setTelegraph((int)Speed); Aircraft.setTelegraph does
+            // _telegraph = telegraph-1, so send idx+1 to land on _telegraph == idx.
             var msg = new PlayerOrderMessage
             {
-                SourceEntityId = __instance.UniqueID,
-                Order          = OrderType.SetAltitude,
-                Speed          = (float)preset,
-                Heading        = updateAltForWaypoints ? 1f : 0f,
+                SourceEntityId = ac.UniqueID,
+                Order          = OrderType.SetSpeed,
+                Speed          = idx + 1,
             };
 
-            OrderSyncHelper.Postfix(__instance, msg);
+            return OrderSyncHelper.Prefix(ac, msg);
         }
     }
 

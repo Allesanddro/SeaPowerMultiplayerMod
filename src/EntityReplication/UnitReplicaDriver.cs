@@ -208,10 +208,13 @@ namespace SeapowerMultiplayer
                 {
                     unit.transform.position = Vector3.Lerp(unit.transform.position, hostPos, posLerp);
                     float newHeading = Mathf.LerpAngle(unit.transform.eulerAngles.y, heading, hdgLerp);
-                    float newPitch = isAir
+                    // Subs carry a host-authoritative dive angle (pitch) and some roll;
+                    // surface ships keep their local wave-motion attitude.
+                    bool syncAttitude = isAir || e.Kind == UnitType.Submarine;
+                    float newPitch = syncAttitude
                         ? Mathf.LerpAngle(unit.transform.eulerAngles.x, pitch, hdgLerp)
                         : unit.transform.eulerAngles.x;
-                    float newRoll = isAir
+                    float newRoll = syncAttitude
                         ? Mathf.LerpAngle(unit.transform.eulerAngles.z, roll, hdgLerp)
                         : unit.transform.eulerAngles.z;
                     unit.transform.eulerAngles = new Vector3(newPitch, newHeading, newRoll);

@@ -27,6 +27,9 @@ namespace SeapowerMultiplayer.Messages
         ManualGunFire   = 20,  // v2: client gun trigger → host (Heading=mount idx, TargetX/Y/Z=solution dir, AmmoId)
         LaunchAircraft  = 21,  // v2: client carrier launch intent → host (Speed=vehicle, Heading=loadout, DestX=squadron, DestY=callsign, DestZ=count, ShotsToFire=missionType, TargetEntityId=allowLaunch)
         LaunchChaff     = 22,  // v2: client manual chaff → host (clouds replicate back as decoys)
+        AbortLaunch     = 23,  // v2: client aborts a pending carrier launch → host (AmmoId = task Guid string)
+        LaunchNoisemaker = 24, // v2: client manual noisemaker (Shift+D) → host (decoy replicates back as a spawn)
+        SetRudder       = 25,  // manual rudder keys (A/D) → host (Speed = rudder angle, -25..+25)
     }
 
     /// <summary>

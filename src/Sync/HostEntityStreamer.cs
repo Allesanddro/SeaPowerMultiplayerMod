@@ -83,6 +83,7 @@ namespace SeapowerMultiplayer
                 {
                     CaptureAndSend(missileTick, unitTick);
                     EntityCensusManager.HostTick();
+                    if (unitTick) FlightDeckStreamer.HostTick();
                 }
                 catch (System.Exception ex)
                 {

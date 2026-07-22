@@ -27,15 +27,30 @@ namespace SeapowerMultiplayer.Transport
         // SteamNetworkingSockets has a ~512KB per-message limit. Session sync
         // messages can exceed this after gameplay (save files grow to ~1MB+).
         // Fragment large reliable messages into chunks under the limit.
-
-        private const int MaxChunkPayload = 450_000;  // 450KB payload per chunk
+        //
+        // Chunk size must stay well under the connection's send buffer, not just
+        // under the per-message limit: SendMessageToConnection returns
+        // k_EResultLimitExceeded when the buffer already holds too much unsent
+        // data. With the old 450KB chunks only one chunk fit in Steam's 512KB
+        // default buffer, so every multi-chunk message failed on chunk 1.
+        private const int MaxChunkPayload = 128_000;  // 128KB payload per chunk
         private const int FragmentHeaderSize = 9;      // marker(1) + id(4) + index(2) + total(2)
         private const byte FragmentMarker = 0xFF;      // first byte; MessageType enum uses 0-12
 
+        // Send buffer must hold a whole fragmented session sync at once. Steam's
+        // default is 512KB; saves compress to several MB late in a mission.
+        private const int SendBufferBytes = 16 * 1024 * 1024;
+
+        // Fallback backoff if the buffer fills anyway (very slow link). Escalating
+        // delays give the buffer a realistic window to drain: ~5s total.
         private const int FragmentRetryCount = 10;
-        private const int FragmentRetryDelayMs = 100;
+        private const int FragmentRetryBaseDelayMs = 100;
+        private const int FragmentRetryMaxDelayMs = 800;
 
         private uint _nextFragmentId;
+
+        /// <summary>Result of the most recent SendMessageToConnection, for error reporting.</summary>
+        private EResult _lastResult = EResult.k_EResultOK;
 
         private readonly Dictionary<uint, FragmentBuffer> _pendingFragments = new();
         private long _lastCleanupTicks;
@@ -64,6 +79,7 @@ namespace SeapowerMultiplayer.Transport
 
         public int RttMs { get; private set; }
         public bool LastSendFailed { get; private set; }
+        public string? LastSendError { get; private set; }
 
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;
@@ -74,6 +90,8 @@ namespace SeapowerMultiplayer.Transport
             _isHost = asHost;
 
             _connectionStatusCallback = Callback<SteamNetConnectionStatusChangedCallback_t>.Create(OnConnectionStatusChanged);
+
+            ConfigureSendBuffer();
 
             if (asHost)
             {
@@ -90,6 +108,36 @@ namespace SeapowerMultiplayer.Transport
             }
 
             _running = true;
+        }
+
+        /// <summary>
+        /// Raise the per-connection send buffer before any connection is created.
+        /// Steam's 512KB default only fits one fragment chunk, so every multi-chunk
+        /// message (i.e. every large session sync) failed on the second chunk with
+        /// k_EResultLimitExceeded no matter how many times it retried.
+        /// </summary>
+        private void ConfigureSendBuffer()
+        {
+            IntPtr valuePtr = Marshal.AllocHGlobal(sizeof(int));
+            try
+            {
+                Marshal.WriteInt32(valuePtr, SendBufferBytes);
+                bool ok = SteamNetworkingUtils.SetConfigValue(
+                    ESteamNetworkingConfigValue.k_ESteamNetworkingConfig_SendBufferSize,
+                    ESteamNetworkingConfigScope.k_ESteamNetworkingConfig_Global,
+                    IntPtr.Zero,
+                    ESteamNetworkingConfigDataType.k_ESteamNetworkingConfig_Int32,
+                    valuePtr);
+
+                if (ok)
+                    Log.LogInfo($"[SteamTransport] SendBufferSize set to {SendBufferBytes / (1024 * 1024)}MB");
+                else
+                    Log.LogWarning("[SteamTransport] Could not raise SendBufferSize — large session syncs may fail");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(valuePtr);
+            }
         }
 
         public void Stop()
@@ -177,11 +225,12 @@ namespace SeapowerMultiplayer.Transport
         private void SendMessage(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
         {
             LastSendFailed = false;
+            LastSendError = null;
 
             if (length <= MaxChunkPayload)
             {
                 if (!SendRaw(conn, data, length, delivery))
-                    LastSendFailed = true;
+                    FailSend($"Steam rejected the message ({DescribeResult(_lastResult)}).");
                 return;
             }
 
@@ -190,7 +239,7 @@ namespace SeapowerMultiplayer.Transport
             {
                 Log.LogWarning($"[SteamTransport] Unreliable message too large ({length} bytes), sending anyway");
                 if (!SendRaw(conn, data, length, delivery))
-                    LastSendFailed = true;
+                    FailSend($"Steam rejected an oversized unreliable message ({DescribeResult(_lastResult)}).");
                 return;
             }
 
@@ -218,16 +267,20 @@ namespace SeapowerMultiplayer.Transport
 
                 Buffer.BlockCopy(data, offset, chunk, FragmentHeaderSize, payloadLen);
 
-                // Retry with backpressure - Steam's send buffer may be full after
-                // a large prior chunk. The game is paused during session sync so a
-                // brief main-thread block is acceptable.
+                // Retry with backpressure - the send buffer can still fill on a very
+                // slow link. Delays escalate so a slow drain gets a real window
+                // (~5s total) instead of ten futile attempts in one second. The game
+                // is paused during session sync so a brief main-thread block is
+                // acceptable.
                 bool sent = false;
+                int delayMs = FragmentRetryBaseDelayMs;
                 for (int attempt = 0; attempt < FragmentRetryCount; attempt++)
                 {
                     if (attempt > 0)
                     {
-                        Log.LogInfo($"[SteamTransport] Retry {attempt}/{FragmentRetryCount} for chunk {i}/{totalChunks} (id={fragmentId})");
-                        Thread.Sleep(FragmentRetryDelayMs);
+                        Log.LogInfo($"[SteamTransport] Retry {attempt}/{FragmentRetryCount} for chunk {i}/{totalChunks} (id={fragmentId}), waiting {delayMs}ms");
+                        Thread.Sleep(delayMs);
+                        delayMs = Math.Min(delayMs * 2, FragmentRetryMaxDelayMs);
                     }
                     if (SendRaw(conn, chunk, chunkLen, delivery))
                     {
@@ -238,7 +291,7 @@ namespace SeapowerMultiplayer.Transport
                 if (!sent)
                 {
                     Log.LogError($"[SteamTransport] Fragment chunk {i}/{totalChunks} (id={fragmentId}) failed after {FragmentRetryCount} retries — aborting send");
-                    LastSendFailed = true;
+                    FailSend($"Steam dropped chunk {i + 1} of {totalChunks} ({DescribeResult(_lastResult)}).");
                     return;
                 }
             }
@@ -259,6 +312,7 @@ namespace SeapowerMultiplayer.Transport
             {
                 EResult result = SteamNetworkingSockets.SendMessageToConnection(
                     conn, (IntPtr)ptr, (uint)length, flags, out _);
+                _lastResult = result;
                 if (result != EResult.k_EResultOK)
                 {
                     Log.LogError($"[SteamTransport] Send failed: {result}, size={length}");
@@ -267,6 +321,22 @@ namespace SeapowerMultiplayer.Transport
                 return true;
             }
         }
+
+        private void FailSend(string reason)
+        {
+            LastSendFailed = true;
+            LastSendError = reason;
+        }
+
+        /// <summary>Plain-English rendering of the EResult codes send can realistically return.</summary>
+        private static string DescribeResult(EResult result) => result switch
+        {
+            EResult.k_EResultLimitExceeded  => "send buffer full",
+            EResult.k_EResultNoConnection   => "connection closed",
+            EResult.k_EResultInvalidParam   => "message too large",
+            EResult.k_EResultInvalidState   => "connection not ready",
+            _                               => result.ToString(),
+        };
 
         private void ReceiveMessages(HSteamNetConnection conn)
         {

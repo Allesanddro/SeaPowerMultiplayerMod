@@ -10,6 +10,9 @@ namespace SeapowerMultiplayer.Transport
         int RttMs { get; }
         bool LastSendFailed { get; }
 
+        /// <summary>Human-readable reason for the most recent send failure, or null if none.</summary>
+        string? LastSendError { get; }
+
         void Start(bool asHost);
         void Stop();
         void Poll();

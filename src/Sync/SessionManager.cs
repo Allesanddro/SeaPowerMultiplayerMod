@@ -55,8 +55,15 @@ namespace SeapowerMultiplayer
             if (SceneLoading)
             {
                 Log.LogWarning("[Session] CaptureAndSend skipped — SceneLoading=true");
+                SimSyncManager.ReportIssue(
+                    "Sync skipped — a scene is still loading.",
+                    "Wait for the mission to finish loading, then press Send again.");
                 return;
             }
+
+            // Fresh attempt (not a retry) starts with a clean slate
+            if (_retryCount == 0)
+                SimSyncManager.ClearIssue();
 
             Log.LogInfo("[Session] CaptureAndSend starting...");
 
@@ -93,6 +100,9 @@ namespace SeapowerMultiplayer
             if (string.IsNullOrEmpty(savePath))
             {
                 Log.LogWarning("[Session] SaveGame returned empty path — aborting sync.");
+                SimSyncManager.ReportIssue(
+                    "Sync failed — the game could not save the session.",
+                    "Check that the Saves folder is writable, then press Send again.");
                 SimSyncManager.Reset();
                 return;
             }
@@ -107,6 +117,9 @@ namespace SeapowerMultiplayer
             if (ini?.Data == null || ini.Data.Count == 0)
             {
                 Log.LogWarning("[Session] IniHandler cache empty for save — aborting sync.");
+                SimSyncManager.ReportIssue(
+                    "Sync failed — the session save came back empty.",
+                    "Press Send again; if it repeats, reload the mission.");
                 SimSyncManager.Reset();
                 return;
             }
@@ -156,17 +169,26 @@ namespace SeapowerMultiplayer
 
             if (NetworkManager.Instance.LastSendFailed)
             {
+                string reason = NetworkManager.Instance.LastSendError ?? "the transport rejected the message";
+
                 if (_retryCount < MaxRetries)
                 {
                     _retryCount++;
                     _retrySendAt = Time.unscaledTime + RetryDelaySec;
                     Log.LogWarning($"[Session] Send failed — scheduling retry #{_retryCount}/{MaxRetries} in {RetryDelaySec}s");
+                    SimSyncManager.ReportIssue(
+                        $"Sync send failed — retrying ({_retryCount}/{MaxRetries})...",
+                        reason,
+                        warning: true);
                     return;
                 }
                 else
                 {
                     Log.LogError($"[Session] Send failed after {MaxRetries} retries — session sync could not be delivered. Save may be too large ({saveContent.Length} chars).");
                     _retryCount = 0;
+                    SimSyncManager.ReportIssue(
+                        "SYNC FAILED — the other player did NOT receive this game.",
+                        $"{reason} Save was {saveContent.Length / 1024} KB. Press Send again or restart the mission.");
                     SimSyncManager.Reset();
                     return;
                 }
@@ -174,6 +196,7 @@ namespace SeapowerMultiplayer
 
             // Success - reset retry counter
             _retryCount = 0;
+            SimSyncManager.ClearIssue();
 
             // Seed host RNG to match what client will use
             RngSeeder.SeedAll(rngSeed);
@@ -243,6 +266,9 @@ namespace SeapowerMultiplayer
                 else
                 {
                     Log.LogWarning($"[Session] Cannot find mission locally: {msg.MissionFileName}");
+                    SimSyncManager.ReportIssue(
+                        "SYNC FAILED — mission not installed on this PC.",
+                        $"The host is playing \"{msg.MissionFileName}\". Install it and ask them to press Send again.");
                     return;
                 }
             }

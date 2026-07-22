@@ -50,6 +50,7 @@ namespace SeapowerMultiplayer.Transport
 
         public int RttMs { get; private set; }
         public bool LastSendFailed => false;
+        public string? LastSendError => null;   // LiteNetLib fragments internally
 
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;

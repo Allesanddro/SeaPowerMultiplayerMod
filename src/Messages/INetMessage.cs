@@ -29,6 +29,8 @@ namespace SeapowerMultiplayer.Messages
         CensusDiffRequest        = 25,  // client → host: replay spawns for these missing ids
         DeckState                = 26,  // host → client: carrier-relative deck transform (flight ops mimicry)
         FlightOpsAnim            = 27,  // host → client: aircraft/carrier animation events (gear, elevators, deflectors, steam)
+        WeaponHatchEvent         = 28,  // host → client: VLS/torpedo-tube hatch open/close cosmetics
+        FlightDeckState          = 29,  // host → client: per-carrier flight-ops queue + availability (UI mirror)
     }
 
     public interface INetMessage

@@ -216,6 +216,7 @@ namespace SeapowerMultiplayer
             WeaponReplicaDriver.Tick();
             DeckPuppetDriver.Tick();
             CarrierOpsHandler.Tick();
+            WeaponHatchHandler.Tick();
             Suppression.EnforceDefenseFlag();
 
             // Check for pending session sync retries (failed sends)

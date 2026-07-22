@@ -13,21 +13,36 @@ namespace SeapowerMultiplayer
     {
         // Compiled delegates for hot-path reflected fields (avoids FieldInfo.GetValue per-unit)
         private static readonly Func<Vessel, float> _getRudderAngle;
+        private static readonly Func<Submarine, float> _getSubRudderAngle;
+        private static readonly Action<Vessel, float> _setVesselRudderAngle;
+        private static readonly Action<Submarine, float> _setSubRudderAngle;
         private static readonly Func<WeaponBase, ObjectBase> _getLaunchPlatform;
+
+        /// <summary>Compile a get/set pair for a float field. Vessel and Submarine each
+        /// declare their OWN _setRudderAngle (Submarine is not a Vessel), and
+        /// ObjectBase.setRudderAngle is a no-op that only Vessel overrides - so the
+        /// manual-rudder order has to reach the field directly, per concrete type.</summary>
+        private static void CompileFloatField<T>(string fieldName,
+            out Func<T, float> getter, out Action<T, float> setter)
+        {
+            var field = AccessTools.Field(typeof(T), fieldName);
+            if (field == null)
+            {
+                getter = _ => 0f;
+                setter = (_, __) => { };
+                return;
+            }
+            var obj = Expression.Parameter(typeof(T));
+            var val = Expression.Parameter(typeof(float));
+            var access = Expression.Field(obj, field);
+            getter = Expression.Lambda<Func<T, float>>(access, obj).Compile();
+            setter = Expression.Lambda<Action<T, float>>(Expression.Assign(access, val), obj, val).Compile();
+        }
 
         static StateSerializer()
         {
-            var rudderField = AccessTools.Field(typeof(Vessel), "_setRudderAngle");
-            if (rudderField != null)
-            {
-                var param = Expression.Parameter(typeof(Vessel));
-                var access = Expression.Field(param, rudderField);
-                _getRudderAngle = Expression.Lambda<Func<Vessel, float>>(access, param).Compile();
-            }
-            else
-            {
-                _getRudderAngle = _ => 0f;
-            }
+            CompileFloatField<Vessel>("_setRudderAngle", out _getRudderAngle, out _setVesselRudderAngle);
+            CompileFloatField<Submarine>("_setRudderAngle", out _getSubRudderAngle, out _setSubRudderAngle);
 
             var launchField = AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
             if (launchField != null)
@@ -51,6 +66,24 @@ namespace SeapowerMultiplayer
 
         /// <summary>Public accessor for the compiled _setRudderAngle reader (v2 streamer).</summary>
         public static float GetRudderAngle(Vessel v) => _getRudderAngle(v);
+
+        /// <summary>Commanded rudder angle of any steerable unit (0 if it has none).</summary>
+        public static float GetRudderAngle(ObjectBase unit) => unit switch
+        {
+            Vessel v    => _getRudderAngle(v),
+            Submarine s => _getSubRudderAngle(s),
+            _           => 0f,
+        };
+
+        /// <summary>Apply a commanded rudder angle (manual A/D steering).</summary>
+        public static void SetRudderAngle(ObjectBase unit, float angle)
+        {
+            switch (unit)
+            {
+                case Vessel v:    _setVesselRudderAngle(v, angle); break;
+                case Submarine s: _setSubRudderAngle(s, angle);    break;
+            }
+        }
 
         /// <summary>
         /// Find any ObjectBase by UniqueID. Uses SceneCreator's fast dictionary first,
@@ -276,6 +309,14 @@ namespace SeapowerMultiplayer
                         unit.LaunchChaff(false);
                         break;
 
+                    case Messages.OrderType.LaunchNoisemaker:
+                        // launchNoisemaker is declared on Submarine/Vessel (not
+                        // ObjectBase); it queues a noisemaker EngageTask the host
+                        // fires natively, replicating the decoy back to the client.
+                        if (unit is Submarine subNm) subNm.launchNoisemaker();
+                        else if (unit is Vessel vesNm) vesNm.launchNoisemaker();
+                        break;
+
                     case Messages.OrderType.ManualGunFire:
                     {
                         // v2: client gun trigger - aim the mount with the client's
@@ -334,6 +375,19 @@ namespace SeapowerMultiplayer
                         break;
                     }
 
+                    case Messages.OrderType.AbortLaunch:
+                    {
+                        // v2: client aborted a pending carrier launch - cancel it host-side;
+                        // the removal + restored stores stream back via FlightDeckState.
+                        var fd = unit._obp?._flightDeck;
+                        if (fd != null && System.Guid.TryParse(msg.AmmoId, out var abortUid))
+                        {
+                            fd.abortLaunchTask(abortUid);
+                            Plugin.Log.LogInfo($"[Order] AbortLaunch: carrier={unit.UniqueID} uid={abortUid}");
+                        }
+                        break;
+                    }
+
                     // SetHeading removed - setRudderAngle patch was semantically wrong
                     // (sent rudder angle as heading). Heading syncs via waypoints + state corrections.
 
@@ -382,6 +436,15 @@ namespace SeapowerMultiplayer
 
                     case Messages.OrderType.SetDepth:
                         if (unit is Submarine sub) sub.setDepth(msg.Speed);
+                        break;
+
+                    // Manual rudder (A/D). InputHandler flags the player override
+                    // before every step - without it the receiving side's autopilot
+                    // (setRudderBasedOnCourse) overwrites the commanded angle on the
+                    // next tick and the turn never happens.
+                    case Messages.OrderType.SetRudder:
+                        unit.setPlayerCommandOverride(true);
+                        StateSerializer.SetRudderAngle(unit, msg.Speed);
                         break;
 
                     case Messages.OrderType.CeaseFire:

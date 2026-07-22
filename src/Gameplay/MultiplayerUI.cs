@@ -28,6 +28,7 @@ namespace SeapowerMultiplayer
         private GUIStyle? _dimLabelStyle;
         private GUIStyle? _separatorStyle;
         private GUIStyle? _popupBoxStyle;
+        private GUIStyle? _alertBoxStyle;
         private GUIStyle? _teamLabelStyle;
         private GUIStyle? _dropdownBoxStyle;
         private GUIStyle? _collapseButtonStyle;
@@ -164,6 +165,14 @@ namespace SeapowerMultiplayer
             _popupBoxStyle = new GUIStyle()
             {
                 padding = new RectOffset(14, 14, 12, 12),
+                border  = new RectOffset(8, 8, 8, 8),
+                normal  = { background = _alertBgTex },
+            };
+
+            // ── Inline sync issue banner (compact alert) ─────────────────────
+            _alertBoxStyle = new GUIStyle()
+            {
+                padding = new RectOffset(8, 8, 6, 6),
                 border  = new RectOffset(8, 8, 8, 8),
                 normal  = { background = _alertBgTex },
             };
@@ -670,28 +679,64 @@ namespace SeapowerMultiplayer
 
         private void DrawSyncState(bool isHost)
         {
+            // The issue banner draws even in Idle - a sync that failed outright
+            // leaves the state machine Idle, and that must not look like "fine".
+            DrawSyncIssue();
+
             var state = SimSyncManager.CurrentState;
-            if (state == SimState.Idle) return;
 
-            GUILayout.Space(2);
-
-            switch (state)
+            if (state != SimState.Idle)
             {
-                case SimState.WaitingForClient:
-                    GUILayout.Label("Waiting for client to load...", _warningStyle);
-                    break;
-                case SimState.Synchronized when GameTime.IsPaused():
-                    GUILayout.Label("Client ready \u2014 unpause to begin", _successStyle);
-                    break;
-                case SimState.Synchronized:
-                    GUILayout.Label("Sim synced", _successStyle);
-                    break;
+                GUILayout.Space(2);
+
+                switch (state)
+                {
+                    case SimState.WaitingForClient:
+                        GUILayout.Label("Waiting for client to load...", _warningStyle);
+                        break;
+                    case SimState.Synchronized when GameTime.IsPaused():
+                        GUILayout.Label("Client ready \u2014 unpause to begin", _successStyle);
+                        break;
+                    case SimState.Synchronized:
+                        GUILayout.Label("Sim synced", _successStyle);
+                        break;
+                }
+            }
+            else if (!SimSyncManager.HasIssue && NetworkManager.Instance.IsConnected)
+            {
+                // Connected but nothing synced yet - say so rather than showing
+                // nothing, which previously read as a healthy session.
+                GUILayout.Space(2);
+                GUILayout.Label(isHost
+                    ? "Not synced \u2014 press Send State & Wait"
+                    : "Not synced \u2014 waiting for host", _warningStyle);
             }
 
             if (!isHost && SessionManager.IsReceiving)
             {
                 GUILayout.Label("Receiving scene...", _warningStyle);
             }
+        }
+
+        /// <summary>
+        /// Sticky banner for a failed or degraded sync. Stays up until the next
+        /// sync attempt starts, so a failure can't scroll past unnoticed.
+        /// </summary>
+        private void DrawSyncIssue()
+        {
+            if (!SimSyncManager.HasIssue) return;
+
+            bool warning = SimSyncManager.IssueIsWarning;
+
+            GUILayout.Space(4);
+            GUILayout.BeginVertical(_alertBoxStyle!);
+            string icon = warning ? "\u27f3" : "\u26a0";
+            GUILayout.Label($"{icon}  {SimSyncManager.IssueMessage}",
+                            warning ? _warningStyle : _criticalStyle);
+            if (SimSyncManager.IssueHint != null)
+                GUILayout.Label(SimSyncManager.IssueHint, _dimLabelStyle);
+            GUILayout.EndVertical();
+            GUILayout.Space(2);
         }
 
         // ── Time compression section ──────────────────────────────────────────
@@ -744,6 +789,10 @@ namespace SeapowerMultiplayer
 
         private SyncStatus ComputeOverallStatus()
         {
+            // A reported sync issue outranks drift - it means the two sides may not
+            // even be in the same mission, which no drift metric would reveal.
+            if (SimSyncManager.HasIssue)
+                return SimSyncManager.IssueIsWarning ? SyncStatus.Degraded : SyncStatus.Issues;
             if (StateApplier.ShipDriftMax > 100f || StateApplier.AirDriftMax > 200f) return SyncStatus.Issues;
             if (StateApplier.ShipDriftAvg > 20f || StateApplier.AirDriftAvg > 40f) return SyncStatus.Degraded;
             return SyncStatus.OK;
