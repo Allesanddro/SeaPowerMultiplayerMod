@@ -71,6 +71,11 @@ namespace SeapowerMultiplayer
         // Panel expand/collapse state (clickable header toggle)
         private bool _panelExpanded = true;
 
+        // Transient feedback for the Steam lobby copy/join buttons
+        private string _lobbyMsg = "";
+        private float _lobbyMsgUntil;
+        private const float LobbyMsgSeconds = 4f;
+
         // Scroll hysteresis - prevents flicker when content is near the boundary
         private bool _scrollActive = false;
 
@@ -670,6 +675,8 @@ namespace SeapowerMultiplayer
         {
             bool isConnected = NetworkManager.Instance.IsConnected;
             bool inLobby     = SteamLobbyManager.InLobby;
+            bool isOwner     = SteamLobbyManager.IsLobbyOwner;
+            string peerName  = SteamLobbyManager.PeerName;
             string modeStr;
             Color  statusCol;
             string statusStr;
@@ -684,9 +691,9 @@ namespace SeapowerMultiplayer
             }
             else if (inLobby)
             {
-                modeStr = "STEAM (HOST)";
+                modeStr = isOwner ? "STEAM (HOST)" : "STEAM (CLIENT)";
                 statusCol = new Color(1f, 1f, 0.3f);
-                statusStr = "In Lobby";
+                statusStr = isOwner ? "In Lobby" : "Connecting";
             }
             else
             {
@@ -713,6 +720,9 @@ namespace SeapowerMultiplayer
                 GUILayout.Label($"Lobby: {SteamLobbyManager.MemberCount}/2 players", _labelStyle);
             }
 
+            if (peerName.Length > 0)
+                GUILayout.Label($"  Player: {peerName}", _dimLabelStyle);
+
             GUILayout.Space(4);
 
             if (isConnected)
@@ -728,9 +738,22 @@ namespace SeapowerMultiplayer
                         SessionManager.CaptureAndSend();
                 }
             }
-            else if (inLobby)
+            else if (inLobby && isOwner)
             {
-                // In lobby, waiting for peer
+                // Hosting, waiting for a peer - hand out the code or use Steam's invite
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Code:", _dimLabelStyle, GUILayout.Width(40));
+                GUILayout.Label(SteamLobbyManager.ShareCode, _labelStyle);
+                GUILayout.EndHorizontal();
+
+                if (GUILayout.Button("Copy Code", _buttonStyle))
+                {
+                    GUIUtility.systemCopyBuffer = SteamLobbyManager.ShareCode;
+                    SetLobbyMsg("Code copied to clipboard");
+                }
+
+                GUILayout.Space(2);
+
                 if (GUILayout.Button("Invite Friend", _buttonStyle))
                     SteamLobbyManager.InviteFriend();
 
@@ -739,14 +762,47 @@ namespace SeapowerMultiplayer
                 if (GUILayout.Button("Leave Lobby", _buttonStyle))
                     SteamLobbyManager.LeaveLobby();
             }
+            else if (inLobby)
+            {
+                // Joined someone else's lobby - transport is connecting
+                if (GUILayout.Button("Leave Lobby", _buttonStyle))
+                    SteamLobbyManager.LeaveLobby();
+            }
             else
             {
-                // Not in lobby - create one
-                if (GUILayout.Button("Create Lobby", _buttonStyle))
+                if (GUILayout.Button("Host Lobby", _buttonStyle))
                     SteamLobbyManager.CreateLobby();
+
+                GUILayout.Space(2);
+
+                if (GUILayout.Button("Join from Clipboard", _buttonStyle))
+                {
+                    string code = GUIUtility.systemCopyBuffer;
+                    if (SteamLobbyManager.TryJoinByCode(code, out string error))
+                        SetLobbyMsg("Joining lobby...");
+                    else
+                        SetLobbyMsg(error);
+                }
+
+                GUILayout.Label("Copy a host's code, then join.", _dimLabelStyle);
             }
 
+            // Expire only on the Layout pass - dropping the label between Layout
+            // and Repaint would desync IMGUI's control list.
+            if (Event.current.type == EventType.Layout && Time.realtimeSinceStartup >= _lobbyMsgUntil)
+                _lobbyMsg = "";
+
+            if (_lobbyMsg.Length > 0)
+                GUILayout.Label(_lobbyMsg, _dimLabelStyle);
+
             DrawSyncState(NetworkManager.Instance.IsHost);
+        }
+
+        /// <summary>Transient one-line feedback under the Steam lobby buttons.</summary>
+        private void SetLobbyMsg(string msg)
+        {
+            _lobbyMsg = msg;
+            _lobbyMsgUntil = Time.realtimeSinceStartup + LobbyMsgSeconds;
         }
 
         private void DrawSyncState(bool isHost)
