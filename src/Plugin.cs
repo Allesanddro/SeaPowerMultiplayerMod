@@ -34,6 +34,9 @@ namespace SeapowerMultiplayer
         // PvP sync tuning
         internal ConfigEntry<float> CfgDamageSyncInterval = null!;
 
+        // Connection resilience
+        internal ConfigEntry<int> CfgDisconnectTimeoutSec = null!;
+
         // State stream rates (host)
         internal ConfigEntry<int> CfgMissileStateHz = null!;
         internal ConfigEntry<int> CfgUnitStateHz = null!;
@@ -55,6 +58,11 @@ namespace SeapowerMultiplayer
             CfgPvP         = Config.Bind("Network", "PvP",          true,        "True = PvP mode (opposing taskforces); False = co-op (shared ally control)");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
+            CfgDisconnectTimeoutSec = Config.Bind("Network", "DisconnectTimeoutSec", 20,
+                "Seconds of silence before the link is declared dead. The stock transport defaults " +
+                "(LiteNetLib 5s, Steam 10s) drop high-latency players during ordinary stalls. " +
+                "A dead link now freezes the session rather than silently splitting it, so a slower " +
+                "verdict costs nothing.");
 
             // Debug
             CfgVerboseDebug = Config.Bind("Debug", "VerboseLogging", false,
@@ -222,6 +230,9 @@ namespace SeapowerMultiplayer
 
             // Check for pending session sync retries (failed sends)
             SessionManager.TickRetry();
+
+            // Hold the sim frozen while a dropped peer is being recovered
+            ReconnectManager.Tick();
 
             // Ctrl+F10: manual hard sync
             if (Input.GetKeyDown(KeyCode.F10) &&

@@ -59,7 +59,18 @@ namespace SeapowerMultiplayer.Transport
         public void Start(bool asHost)
         {
             _isHost = asHost;
-            _net = new NetManager(this) { AutoRecycle = true, ReuseAddress = true };
+            // DisconnectTimeout defaults to 5s, which a 300ms-RTT link loses to
+            // routinely: one stalled frame plus a burst of reliable traffic is
+            // enough to starve the keepalive. PingInterval is tightened at the same
+            // time so the timeout is measured from frequent, cheap probes rather
+            // than from whatever gameplay traffic happens to be flowing.
+            _net = new NetManager(this)
+            {
+                AutoRecycle = true,
+                ReuseAddress = true,
+                DisconnectTimeout = Plugin.Instance.CfgDisconnectTimeoutSec.Value * 1000,
+                PingInterval = 1000,
+            };
 
             _simLossPct   = Plugin.Instance.CfgNetSimLossPct.Value;
             _simLatencyMs = Plugin.Instance.CfgNetSimLatencyMs.Value;
