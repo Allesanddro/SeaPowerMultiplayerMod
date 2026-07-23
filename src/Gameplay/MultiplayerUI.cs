@@ -992,6 +992,9 @@ namespace SeapowerMultiplayer
             GUILayout.Label($"  In {FormatRate(_net2RateInBps)}  ·  Out {FormatRate(_net2RateOutBps)}  ·  " +
                 $"Total ↓{Telemetry.TotalBytesIn / 1024}K ↑{Telemetry.TotalBytesOut / 1024}K", _dimLabelStyle);
 
+            GUILayout.Label($"  Packet loss (10s): {(nm.PacketLossPct < 0f ? "n/a" : $"{nm.PacketLossPct:F1}%")}",
+                _dimLabelStyle);
+
             var (sMin, sAvg, sMax) = Telemetry.FrameSendStats();
             GUILayout.Label($"  Send/frame: min {sMin}B  avg {sAvg:F0}B  max {sMax}B", _dimLabelStyle);
 
