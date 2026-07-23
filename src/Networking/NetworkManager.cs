@@ -263,6 +263,8 @@ namespace SeapowerMultiplayer
                 CarrierOpsHandler.Reset();
                 WeaponHatchHandler.Reset();
                 FlightDeckStreamer.Reset();
+                ViewportHintSender.Reset();
+                HostEntityStreamer.ClearViewportHint();
                 SpawnReplicator.Reset();
                 WeaponReplicaDriver.Reset();
                 EntityCensusManager.Reset();
@@ -414,6 +416,13 @@ namespace SeapowerMultiplayer
                 {
                     var msg = SessionSyncMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => SessionManager.ApplyReceivedSession(msg));
+                    break;
+                }
+
+                case MessageType.ViewportHint:
+                {
+                    var msg = ViewportHintMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => HostEntityStreamer.OnViewportHint(msg));
                     break;
                 }
 
