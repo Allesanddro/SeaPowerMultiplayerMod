@@ -371,9 +371,63 @@ namespace SeapowerMultiplayer
                 Telemetry.Count("v2.spawnWeapon");
             }
 
+            // The replica above is a fresh pool instance by design - nothing has
+            // touched the shooter's own stores, so its pylon round and ammo count
+            // are still those from the join save. Consume one round to match what
+            // the host's launch() just did. Submunitions excluded: their "shooter"
+            // is the platform, but no store was expended for them.
+            if (!isSub)
+                ConsumeShooterStores(shooter, ap._ammunitionFileName);
+
             if (Plugin.Instance.CfgVerboseDebug.Value)
                 Plugin.Log.LogDebug($"[SpawnReplicator] Spawned replica id={msg.EntityId} " +
                     $"ammo={msg.AmmoName} shooter={msg.ShooterId} target={msg.TargetId} live={liveLocal}");
+        }
+
+        /// <summary>
+        /// Mirror WeaponSystemHardpoint.launch()'s bookkeeping on the client: the
+        /// host launch removed the mounted WeaponBase from its pylon and decremented
+        /// the loaded-ammo count, but the client shooter is a replica whose weapon
+        /// systems never fire locally - without this its loadout display and pylon
+        /// models never change. For systems with no mounted instance (ship
+        /// launchers, internal bays) only the count is adjusted; their visuals are
+        /// hatch/reload animations the game drives separately.
+        /// </summary>
+        private static void ConsumeShooterStores(ObjectBase? shooter, string ammoName)
+        {
+            if (shooter == null || string.IsNullOrEmpty(ammoName)) return;
+
+            var systems = shooter.GetWeaponSystemsForAmmunition(ammoName, copyList: false);
+            if (systems == null) return;
+
+            // Prefer the system that visibly carries the round on a pylon.
+            foreach (var ws in systems)
+            {
+                if (ws is not WeaponSystemHardpoint hp) continue;
+                for (int i = 0; i < hp._weapons.Count; i++)
+                {
+                    var mounted = hp._weapons[i];
+                    if (mounted == null || mounted.isLaunched()) continue;
+                    if (mounted._ap?._ammunitionFileName != ammoName) continue;
+
+                    hp._weapons.RemoveAt(i);
+                    mounted.gameObject.SetActive(false);
+                    if (hp._weapons.Count == 0) hp._isEmpty = true;
+                    hp.decreaseLoadedAmmoCount(ammoName);
+                    return;
+                }
+            }
+
+            foreach (var ws in systems)
+            {
+                if (ws.getLoadedAmmoCount(ammoName) > 0)
+                {
+                    ws.decreaseLoadedAmmoCount(ammoName);
+                    return;
+                }
+            }
+
+            Telemetry.Count("v2.storesConsumeMissed");
         }
 
         private static AmmunitionParameters? GetAmmoParams(string ammoName)
