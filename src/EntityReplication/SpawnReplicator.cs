@@ -51,6 +51,7 @@ namespace SeapowerMultiplayer
         {
             _tombstones.Clear();
             _tombstoneAge.Clear();
+            _spawnFailures.Clear();
         }
 
         /// <summary>Assign the host's id without polluting the client's UID counter
@@ -94,14 +95,34 @@ namespace SeapowerMultiplayer
                     case SpawnKind.Unit:   SpawnUnitReplica(msg);   break;
                     case SpawnKind.Decoy:  SpawnDecoyReplica(msg);  break;
                 }
+                _spawnFailures.Remove(msg.EntityId);
             }
             catch (Exception ex)
             {
                 Telemetry.Count("v2.spawnFailed");
                 Plugin.Log.LogError($"[SpawnReplicator] Spawn failed id={msg.EntityId} kind={msg.Kind} " +
-                    $"ammo={msg.AmmoName} ini={msg.UnitIniName}: {ex}");
+                    $"ammo={msg.AmmoName} ini={msg.UnitIniName} shooter={msg.ShooterId}: {ex}");
+
+                // A spawn that throws (missing shooter, bad ammo ini, PlottingTable
+                // NRE) fails identically on every census re-request: a PvP session
+                // log showed five enemy sonobuoys retried every cycle for minutes -
+                // 77 exceptions - until they expired host-side. A couple of retries
+                // give a late-arriving dependency (the shooter's own spawn) a
+                // chance; after that, tombstone so the census stops asking.
+                _spawnFailures.TryGetValue(msg.EntityId, out int failures);
+                _spawnFailures[msg.EntityId] = ++failures;
+                if (failures >= MaxSpawnAttempts)
+                {
+                    _spawnFailures.Remove(msg.EntityId);
+                    Tombstone(msg.EntityId);
+                    Plugin.Log.LogWarning($"[SpawnReplicator] id={msg.EntityId} failed to spawn " +
+                        $"{MaxSpawnAttempts} times - giving up (tombstoned)");
+                }
             }
         }
+
+        private static readonly Dictionary<int, int> _spawnFailures = new();
+        private const int MaxSpawnAttempts = 3;
 
         /// <summary>Mirror a host aircraft/helicopter spawn (carrier launch, mission
         /// reinforcement) through the game's own creator, under the host's id.</summary>
