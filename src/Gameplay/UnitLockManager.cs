@@ -125,11 +125,39 @@ namespace SeapowerMultiplayer
         private const float NoticeSeconds = 3f;
         private static float _nextRefusalLog;
 
+        // ── Player-input recency ─────────────────────────────────────────────
+        //
+        // The order patches cannot tell a player's click from the unit's own
+        // local sim: state machines tick on BOTH machines, and for an aircraft
+        // the partner is flying they keep re-issuing internal waypoint/speed
+        // maintenance calls, each of which is (correctly) refused by the lock.
+        // Each refusal refreshed the notice, so "your ally is commanding it"
+        // sat on screen permanently while the other player merely flew the
+        // aircraft. A refusal is only worth telling the player about when THEY
+        // just did something - approximated as a mouse press/release moments
+        // ago, which every map or panel-issued order involves.
+
+        private const float InputRecencySec = 0.3f;
+        private static float _lastPointerInputTime = -1f;
+
+        /// <summary>Called once per frame from Plugin.Update.</summary>
+        public static void SampleInput()
+        {
+            if (UnityEngine.Input.GetMouseButton(0) || UnityEngine.Input.GetMouseButton(1)
+                || UnityEngine.Input.GetMouseButtonUp(0) || UnityEngine.Input.GetMouseButtonUp(1))
+                _lastPointerInputTime = UnityEngine.Time.unscaledTime;
+        }
+
         /// <summary>Called when the ally lock refuses an order. Safe to call every
         /// frame - a waypoint drag fires continuously, so the notice just keeps
-        /// refreshing its own expiry and the log line is throttled.</summary>
+        /// refreshing its own expiry and the log line is throttled. Refusals with
+        /// no recent player input are internal sim calls - refused silently.</summary>
         public static void NoteOrderRefused(ObjectBase? unit)
         {
+            if (_lastPointerInputTime < 0f
+                || UnityEngine.Time.unscaledTime - _lastPointerInputTime > InputRecencySec)
+                return;
+
             LastRefusedUnitName = unit == null ? "" : unit.Name?.Value ?? unit.name;
             RefusalNoticeUntil  = UnityEngine.Time.unscaledTime + NoticeSeconds;
 

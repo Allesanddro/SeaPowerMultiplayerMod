@@ -1815,7 +1815,7 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.LaunchChaff))]
     public static class Patch_ObjectBase_LaunchChaff
     {
-        static bool Prefix(ObjectBase __instance)
+        static bool Prefix(ObjectBase __instance, bool message)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
 
@@ -1824,6 +1824,16 @@ namespace SeapowerMultiplayer
             if (NetworkManager.Instance.IsEstablished)
             {
                 if (Plugin.Instance.CfgIsHost.Value) return true;
+
+                // message=false is the missile-evasion states, not the player
+                // (InputHandler and the weapons panel both pass true). Incoming
+                // missile REPLICAS register as threats, so the client's aircraft
+                // enter evasion locally and were originating chaff decisions of
+                // their own. In co-op the host runs the same evasion AI for this
+                // aircraft and chaffs natively - drop the duplicate. PvP keeps
+                // auto-chaff by design, so it still forwards.
+                if (!message && !Plugin.Instance.CfgPvP.Value) return false;
+
                 NetworkManager.Instance.SendToServer(new PlayerOrderMessage
                 {
                     SourceEntityId = __instance.UniqueID,

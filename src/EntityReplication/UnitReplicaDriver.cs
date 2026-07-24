@@ -143,6 +143,10 @@ namespace SeapowerMultiplayer
             public bool  HasPrev;
             public bool  WarnedFarDrift;
 
+            // Puppet control-surface feed (FeedPuppetControlState)
+            public float PrevBank, PrevPitch;
+            public bool  AttitudeValid;
+
             public readonly Snapshot[] Buf = new Snapshot[Capacity];
             public int Count;
             public int Head = Capacity - 1;  // first Push lands on 0
@@ -546,7 +550,8 @@ namespace SeapowerMultiplayer
             // Render remote units slightly in the host's past so a bracketing pair of
             // snapshots is already in hand. This is what converts the link's arrival
             // jitter from target noise into a fixed, invisible offset.
-            float renderMissionSec = LocalMissionSeconds() - RenderDelayGameSec();
+            float nowMissionSec    = LocalMissionSeconds();
+            float renderMissionSec = nowMissionSec - RenderDelayGameSec();
 
             float shipDriftSum = 0f, shipDriftMax = 0f; int shipCount = 0;
             float airDriftSum  = 0f, airDriftMax  = 0f; int airCount  = 0;
@@ -560,11 +565,20 @@ namespace SeapowerMultiplayer
                 if (realNow - s.RecordRealTime > MaxSampleAgeRealSec) continue;
 
                 var tr = unit.transform;
-                bool isAir = s.Kind == UnitType.Aircraft || s.Kind == UnitType.Helicopter;
+                bool isAir  = s.Kind == UnitType.Aircraft || s.Kind == UnitType.Helicopter;
+                bool puppet = isAir && AircraftReplicaDriver.IsFormationPuppet(unit);
 
-                Pose pose = ResolvePose(s, renderMissionSec);
+                // Chase-driven aircraft measure against the track extrapolated to
+                // NOW: their native physics flies at a point ahead of the newest
+                // sample, so a render-delayed target sits speed x delay BEHIND the
+                // aircraft - at time compression that systematic offset alone
+                // exceeded the accept band and the corrector dragged the plane
+                // backwards against its own flight model every frame (the
+                // normal-flight ghosting). Puppets have no local motion to
+                // disagree with, so they keep the smoother interpolated target.
+                Pose pose = ResolvePose(s, isAir && !puppet ? nowMissionSec : renderMissionSec);
 
-                if (isAir) DriveAircraft(unit, tr, s, in pose, easeDt, ref airDriftSum, ref airDriftMax, ref airCount);
+                if (isAir) DriveAircraft(unit, tr, s, in pose, easeDt, puppet, ref airDriftSum, ref airDriftMax, ref airCount);
                 else       DriveSurface(unit, tr, s, in pose, easeDt, ref shipDriftSum, ref shipDriftMax, ref shipCount);
             }
 
@@ -627,7 +641,7 @@ namespace SeapowerMultiplayer
         /// corrected, which is where the airborne jitter came from.
         /// </summary>
         private static void DriveAircraft(ObjectBase unit, Transform tr, Sample s, in Pose pose,
-            float dt, ref float driftSum, ref float driftMax, ref int count)
+            float dt, bool puppet, ref float driftSum, ref float driftMax, ref int count)
         {
             Vector3 pos = tr.position;
             Vector3 target = pose.Position;   // y carries the streamed height directly
@@ -638,7 +652,7 @@ namespace SeapowerMultiplayer
             {
                 kXZ = kY = Ease(AirNearSharpness, dt);
             }
-            else if (AircraftReplicaDriver.IsFormationPuppet(unit))
+            else if (puppet)
             {
                 // Wingman puppet: its FormationFlightPhysics is suppressed while
                 // the stream is fresh (the station-keeper writes the transform
@@ -692,6 +706,48 @@ namespace SeapowerMultiplayer
                 Mathf.LerpAngle(eul.z, pose.Roll, kAng));
 
             unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, pose.Speed, Ease(AirSpeedSharpness, dt));
+
+            if (puppet) FeedPuppetControlState(unit, tr, s, in pose);
+        }
+
+        /// <summary>
+        /// Puppets get no control-surface animation for free: the suppressed
+        /// FormationFlightPhysics.OnFixedUpdate is what used to refresh
+        /// BankAngle/BankRate/PitchRate/GLoad, and its still-running OnUpdate
+        /// computes the Normed*ControlDemand values (which
+        /// AircraftFlightControlSystem turns into aileron/elevator/rudder
+        /// deflection) FROM those fields - frozen inputs, frozen surfaces. Feed
+        /// the observed kinematics of the pose we just imposed back into the
+        /// controller and the game's own demand math animates the surfaces to
+        /// match the manoeuvre, with its own gains and sign conventions.
+        /// </summary>
+        private static void FeedPuppetControlState(ObjectBase unit, Transform tr, Sample s, in Pose pose)
+        {
+            var mc = (unit as Aircraft)?.Motioncontroller;
+            if (mc == null) return;
+
+            // Same formulas FormationFlightPhysics.OnFixedUpdate used.
+            float bank  = Utils.AngleOffAroundAxis(tr.up, Vector3.up, tr.forward);
+            float pitch = Utils.AngleOffAroundAxis(tr.forward,
+                Vector3.ProjectOnPlane(tr.forward, Vector3.up),
+                Vector3.ProjectOnPlane(tr.right, Vector3.up), clockwise: true);
+
+            float gdt = GameTime.deltaTime;
+            if (s.AttitudeValid && gdt > 0.0001f)
+            {
+                mc.BankRate  = Mathf.DeltaAngle(s.PrevBank,  bank)  / gdt;
+                mc.PitchRate = Mathf.DeltaAngle(s.PrevPitch, pitch) / gdt;
+            }
+            s.PrevBank      = bank;
+            s.PrevPitch     = pitch;
+            s.AttitudeValid = true;
+
+            mc.BankAngle  = bank;
+            mc.PitchAngle = pitch;
+            mc.YawAngle   = tr.eulerAngles.y;
+            mc.Velocity   = pose.Speed * 0.514444f; // knots → m/s
+            // Level-turn approximation - only the pitch demand's G term reads it.
+            mc.GLoad = Mathf.Clamp(1f / Mathf.Max(0.2f, Mathf.Cos(bank * Mathf.Deg2Rad)), 1f, 9f);
         }
 
         /// <summary>Frame-rate-independent smoothing fraction for a rate of k per second.</summary>

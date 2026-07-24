@@ -283,6 +283,7 @@ namespace SeapowerMultiplayer
             CarrierOpsHandler.Tick();
             WeaponHatchHandler.Tick();
             Suppression.EnforceDefenseFlag();
+            UnitLockManager.SampleInput();
 
             // Check for pending session sync retries (failed sends)
             SessionManager.TickRetry();
