@@ -45,19 +45,22 @@ namespace SeapowerMultiplayer
         private const float AirSpeedSharpness    = 4f;
         private const float AirNearSharpness     = 4f;
         private const float AirFarSharpness      = 2f;
+        private const float AirPuppetSharpness   = 6f;
 
         // Hard resync tier (horizontal, Unity units - ~67 m each). Aircraft have
         // their own tiers inline in DriveAircraft.
         private const float ShipSnapThreshold = 75f;
 
-        // Aircraft position tolerance tiers, in UNITY UNITS - transform.y is a Unity
-        // unit like x/z (~67.2 m each), NOT metres. The old bare 50/500 therefore
-        // meant a 3.4 km accept band and a 34 km snap: a wingman could sit ~11,000 ft
-        // off the host's altitude indefinitely and never be corrected (and the drift
-        // figure it reported was measured over units that were never touched).
-        // Horizontal keeps the numbers it was tuned to; vertical is sized in metres.
-        private const float AirAcceptXZ = 50f;
-        private const float AirSnapXZ   = 500f;
+        // Aircraft position tolerance tiers, sized in metres and converted to
+        // Unity units (~67.2 m each). Horizontal used to be a bare 50/500 UNITS -
+        // a 3.4 km accept band and a 34 km snap - which meant a host aircraft
+        // could fly an entire evasive engagement (sub-km jinks) without the
+        // client ever correcting: the replica just cruised straight through it.
+        // 150 m still leaves the native physics unfought in steady flight (chase
+        // steering holds the error well under that), while a manoeuvring host now
+        // pulls the replica along its actual path.
+        private const float AirAcceptXZ = 150f  / GeoCodec.MetresPerUnityUnit;
+        private const float AirSnapXZ   = 2000f / GeoCodec.MetresPerUnityUnit;
         private const float AirAcceptY  = 30f  / GeoCodec.MetresPerUnityUnit;   // ~100 ft
         private const float AirSnapY    = 600f / GeoCodec.MetresPerUnityUnit;   // ~2000 ft
 
@@ -634,6 +637,16 @@ namespace SeapowerMultiplayer
             if (isOnDeck)
             {
                 kXZ = kY = Ease(AirNearSharpness, dt);
+            }
+            else if (AircraftReplicaDriver.IsFormationPuppet(unit))
+            {
+                // Wingman puppet: its FormationFlightPhysics is suppressed while
+                // the stream is fresh (the station-keeper writes the transform
+                // directly off the LOCAL leader every physics tick, fighting these
+                // corrections - the wingman jitter), so nothing else moves this
+                // aircraft. Correct every frame with no dead band; every wingman
+                // lags the stream equally, so the formation shape survives.
+                kXZ = kY = Ease(AirPuppetSharpness, dt);
             }
             else
             {
