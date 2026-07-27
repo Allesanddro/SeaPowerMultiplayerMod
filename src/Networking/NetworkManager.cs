@@ -357,6 +357,7 @@ namespace SeapowerMultiplayer
                 Suppression.EnforceDefenseFlag(); // restores client auto-defence
                 TaskforceAssignmentManager.Reset();
                 ContactSyncManager.Reset();
+                ContactRevealManager.Reset();
                 DrawingSyncManager.Reset();
                 SensorStateManager.Reset();
                 UnitLockManager.Reset();
@@ -530,6 +531,13 @@ namespace SeapowerMultiplayer
                 {
                     var msg = ContactSyncMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => ContactSyncManager.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.ContactReport:
+                {
+                    var msg = ContactReportMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => ContactRevealManager.ApplyReceived(msg));
                     break;
                 }
 

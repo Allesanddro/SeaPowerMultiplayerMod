@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 216; // sensor state carries _isGuiding separately - Targeting radars are skipped by RadarCalculator without it
+        public const ushort ProtocolVersion = 217; // ContactReport (client → host): contact existence syncs both ways, not just track numbers one way
 
         /// <summary>LiteNetLib connection key - versioned so old/new builds cannot pair.</summary>
         public static string ConnectKey => $"{PluginInfo.PLUGIN_GUID}/p{ProtocolVersion}";
