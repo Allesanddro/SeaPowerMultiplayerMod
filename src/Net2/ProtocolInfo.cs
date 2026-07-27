@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 218; // UnitStatus (bottom-row status line + mount engagement); AmmoState carries the host's displayed total
+        public const ushort ProtocolVersion = 219; // EntityStateBatch.GameSeconds widened to double (float32 held only ~4 ms at mission-clock magnitudes)
 
         /// <summary>LiteNetLib connection key - versioned so old/new builds cannot pair.</summary>
         public static string ConnectKey => $"{PluginInfo.PLUGIN_GUID}/p{ProtocolVersion}";
