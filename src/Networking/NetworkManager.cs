@@ -360,6 +360,7 @@ namespace SeapowerMultiplayer
                 ContactRevealManager.Reset();
                 DrawingSyncManager.Reset();
                 SensorStateManager.Reset();
+                UnitStatusManager.Reset();
                 UnitLockManager.Reset();
                 StateApplier.ResetOrphanTracking();
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
@@ -552,6 +553,13 @@ namespace SeapowerMultiplayer
                 {
                     var msg = SensorStateMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => SensorStateManager.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.UnitStatus:
+                {
+                    var msg = UnitStatusMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => UnitStatusManager.ApplyReceived(msg));
                     break;
                 }
 

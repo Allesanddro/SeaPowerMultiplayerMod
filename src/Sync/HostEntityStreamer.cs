@@ -121,6 +121,7 @@ namespace SeapowerMultiplayer
                 {
                     CaptureAndSend(missileTick, unitTick, nearTick);
                     EntityCensusManager.HostTick();
+                    AmmoStateCapture.FlushPending();
                     if (unitTick) FlightDeckStreamer.HostTick();
                 }
                 catch (System.Exception ex)
