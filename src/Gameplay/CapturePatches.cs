@@ -68,11 +68,17 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>Replicated weapon classes: missiles, torpedoes, sonobuoy bombs
-        /// (LiveLocal), and ordinary bombs (kinematic replicas).</summary>
+        /// (LiveLocal), and ordinary bombs (kinematic replicas). Ejecting pilots are
+        /// Bombs too (Type=Paratrooper → subType Paratrooper), but they are not a
+        /// launch: ObjectBase.OnFixedUpdate spawns them off any destroyed airframe,
+        /// which the client runs for its own replicas. Classifying them meant the
+        /// client's pilot was killed by the launch canary while the host's was
+        /// replicated as a weapon - so they stay local on both sides, like chaff.</summary>
         internal static byte? WeaponClassOf(WeaponBase wb)
         {
             if (wb is Missile) return 0;
             if (wb is Torpedo) return 1;
+            if (wb is Bomb && wb._ap != null && wb._ap._subType == Ammunition.Type.Paratrooper) return null;
             if (wb is Bomb && wb._ap != null && wb._ap._subType == Ammunition.Type.Sonobuoy) return 2;
             if (wb is Bomb) return 3;
             return null;
@@ -197,20 +203,26 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>Universal weapon removal → EntityDespawn (covers fuel-out, pool
-    /// free, scripted removal - anything that didn't go through Destruction).</summary>
-    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.destroyObject))]
-    public static class Patch_V2_WeaponDestroy_Capture
+    /// free, scripted removal - anything that didn't go through Destruction).
+    /// destroyObject is virtual: Missile and Torpedo override it but chain to base,
+    /// so the WeaponBase hook below covers them. ChaffCloud and Noisemaker override
+    /// it and never call base, so they get their own hooks - without them a decoy's
+    /// death was never captured: no despawn went out and its SpawnLedger entry was
+    /// never forgotten, so the 5 s census kept advertising a cloud that had long
+    /// since decayed and the client re-launched a fresh one off its own dispenser
+    /// every couple of censuses, forever.</summary>
+    public static class Patch_V2_WeaponDespawn_Capture
     {
-        static void Postfix(WeaponBase __instance)
+        internal static void OnDestroyObject(WeaponBase wb)
         {
             if (!CaptureState.HostCaptureActive) return;
-            if (CaptureState.WeaponClassOf(__instance) == null
-                && !(__instance is ChaffCloud) && !(__instance is Noisemaker)) return;
-            int id = __instance.UniqueID;
+            if (CaptureState.WeaponClassOf(wb) == null
+                && !(wb is ChaffCloud) && !(wb is Noisemaker)) return;
+            int id = wb.UniqueID;
             if (!CaptureState.DespawnSent.Add(id)) return;
 
             var geo = Utils.worldPositionFromUnityToLongLat(
-                __instance.transform.position, Globals._currentCenterTile);
+                wb.transform.position, Globals._currentCenterTile);
             NetworkManager.Instance.BroadcastToClients(new EntityDespawnMessage
             {
                 EntityId = id,
@@ -222,6 +234,29 @@ namespace SeapowerMultiplayer
             CaptureState.ForgetSpawn(id);
             Telemetry.Count("v2.capturedDespawn");
         }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.destroyObject))]
+    public static class Patch_V2_WeaponDestroy_Capture
+    {
+        static void Postfix(WeaponBase __instance)
+            => Patch_V2_WeaponDespawn_Capture.OnDestroyObject(__instance);
+    }
+
+    // Decoys capture on the PREFIX: both bodies free the pooled GameObject, so the
+    // transform has to be read before they run.
+    [HarmonyPatch(typeof(ChaffCloud), nameof(ChaffCloud.destroyObject))]
+    public static class Patch_V2_ChaffCloudDestroy_Capture
+    {
+        static void Prefix(ChaffCloud __instance)
+            => Patch_V2_WeaponDespawn_Capture.OnDestroyObject(__instance);
+    }
+
+    [HarmonyPatch(typeof(Noisemaker), nameof(Noisemaker.destroyObject))]
+    public static class Patch_V2_NoisemakerDestroy_Capture
+    {
+        static void Prefix(Noisemaker __instance)
+            => Patch_V2_WeaponDespawn_Capture.OnDestroyObject(__instance);
     }
 
     /// <summary>Unit kills → reliable DestroyEvent (the state-stream flags are
