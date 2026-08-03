@@ -27,10 +27,22 @@ Combat is resolved by the **target** of the engagement. If Player A fires a miss
 
 ## Getting Started
 
-There are three ways to install the mod. Pick whichever suits you best.
+There are four ways to install the mod. Pick whichever suits you best.
 
 <details>
-<summary><b>Option 1: Use the Launcher (Recommended)</b></summary>
+<summary><b>Option 1: Use Steam Workshop (Recommended)</b></summary>
+
+Steam workshop recieves the most up to date fixes and is the simplest installation.
+
+1. DInstall Anchor Chain and follow its setup guide
+2. Install the multiplayer mod from [workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3769566124).
+3. Enable the mod in the mod menu.
+4. Restart the game.
+
+</details>
+
+<details>
+<summary><b>Option 2: Use the Launcher</b></summary>
 
 The launcher handles everything automatically - it installs BepInEx, copies the plugin, and launches the game.
 
@@ -42,7 +54,7 @@ The launcher handles everything automatically - it installs BepInEx, copies the 
 </details>
 
 <details>
-<summary><b>Option 2: Manual DLL Install</b></summary>
+<summary><b>Option 3: Manual DLL Install</b></summary>
 
 If you prefer to manage things yourself:
 
@@ -56,7 +68,7 @@ If you prefer to manage things yourself:
 </details>
 
 <details>
-<summary><b>Option 3: Build from Source</b></summary>
+<summary><b>Option 4: Build from Source</b></summary>
 
 1. Clone this repository:
    ```bash
