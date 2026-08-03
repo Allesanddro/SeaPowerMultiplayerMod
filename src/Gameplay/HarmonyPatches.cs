@@ -1746,6 +1746,23 @@ namespace SeapowerMultiplayer
         static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
     }
 
+    // Active sonar was the hole in this gate. EnableAllActiveSensors fans out to the
+    // two radar methods above plus EnableActiveSonars, so crew AI acting on a unit the
+    // other player owns had its radar half blocked and its sonar half go through -
+    // straight onto the sonar, which writes _sonar.IsActive directly.
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.EnableActiveSonars))]
+    public static class Patch_EnableActiveSonars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableActiveSonars))]
+    public static class Patch_DisableActiveSonars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
     // ── Radar Enable/Disable (catches both context menu and per-sensor UI) ──
     //
     // The player toggles radars via either:
@@ -1843,6 +1860,12 @@ namespace SeapowerMultiplayer
                 if (SessionManager.SceneLoading) return;
                 // Own send path, so the ally lock has to be asked here too.
                 if (UnitLockManager.BlocksOrdersFor(unit)) return;
+                // ...and the ownership test the radar path gets from OrderSyncHelper.
+                // Without it the client relayed sonar flips its own local sim made on
+                // the remote player's units, and the host applied them to its real
+                // ships. ClientMayControl is no substitute: no task force is ever
+                // assigned, so it returns true for everything.
+                if (Suppression.ClientForeignUnit(unit)) return;
 
                 var msg = OrderSyncHelper.SensorMsg(unit, 2, active);
 
