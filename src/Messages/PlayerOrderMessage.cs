@@ -33,6 +33,8 @@ namespace SeapowerMultiplayer.Messages
         AllowLaunch     = 26,  // v2: client releases a readied pending launch → host (AmmoId = task Guid string)
         SetSpeedCustom  = 27,  // speed slider / typed entry (Speed = commanded knots)
         SetHeightCustom = 28,  // depth or altitude slider / typed entry (Speed = DesiredAltitude, Unity units)
+        AttackAtWaypoint = 29, // attack/sonobuoy-drop waypoint (Dest=waypoint geo, Target=attack geo,
+                               // ShotsToFire=salvo, AmmoId=ammo, Speed=packed salvoType+flags, Heading=areaRadius)
     }
 
     /// <summary>

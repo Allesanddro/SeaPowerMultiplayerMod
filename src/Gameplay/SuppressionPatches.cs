@@ -250,6 +250,20 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>Attack/sonobuoy-drop waypoints exist on both sides (they sync as
+    /// OrderType.AttackAtWaypoint), but only the host's copy may fire. The client's
+    /// is for map display: when its replica reaches the waypoint the vanilla task
+    /// would run the attack pipeline anyway - inert for an untargeted drop, since
+    /// HandleEngageTasks is host-only, but a TARGETED one calls InsertEngageTask,
+    /// whose client prefix forwards a fire order upstream and the host shoots twice.
+    /// Only the calculation is skipped; the rest of OnUpdate still runs, so the
+    /// local waypoint completes and clears off the map in step with the host's.</summary>
+    [HarmonyPatch(typeof(AttackAtWaypoint), "AttackCalculations")]
+    public static class Patch_V2_AttackAtWaypoint_Suppress
+    {
+        static bool Prefix() => !Suppression.ClientActive;
+    }
+
     /// <summary>No weapon collision/fuse raycasts on the client, for ANY weapon -
     /// impacts arrive as host events.</summary>
     [HarmonyPatch(typeof(WeaponBase), "CheckCollision")]

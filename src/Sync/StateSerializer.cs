@@ -737,6 +737,31 @@ namespace SeapowerMultiplayer
                         break;
                     }
 
+                    case Messages.OrderType.AttackAtWaypoint:
+                    {
+                        // Sonobuoy drops, air-dropped torpedoes and waypoint-edit
+                        // attacks. Positions are geo (mode-independent, as MoveTo).
+                        ObjectBase? atkTarget = msg.TargetEntityId > 0
+                            ? StateSerializer.FindById(msg.TargetEntityId) : null;
+                        int flags = (int)msg.Speed;
+
+                        // after=null appends. The issuing side chains each task after
+                        // the previous one, so a multi-drop pattern lands in the same
+                        // order here; only a drop inserted mid-route (a waypoint was
+                        // selected) ends up at the end of the list instead.
+                        var atkTask = unit.SetAttackAtWaypointTask(
+                            msg.AmmoId, atkTarget,
+                            new GeoPosition { _longitude = msg.TargetX, _latitude = msg.TargetZ, _height = msg.TargetY },
+                            new GeoPosition { _longitude = msg.DestX,   _latitude = msg.DestZ,   _height = msg.DestY },
+                            msg.ShotsToFire, null,
+                            (EngageTask.SalvoType)(flags & 0xFF), msg.Heading,
+                            (flags & 0x100) != 0, (flags & 0x200) != 0);
+
+                        Plugin.Log.LogInfo($"[Order] AttackAtWaypoint: unit={unit.UniqueID} ammo={msg.AmmoId} " +
+                            $"target={msg.TargetEntityId} salvo={msg.ShotsToFire} created={atkTask != null}");
+                        break;
+                    }
+
                     case Messages.OrderType.SetAltitude:
                     {
                         int preset = (int)msg.Speed;

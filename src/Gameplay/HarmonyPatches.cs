@@ -433,6 +433,79 @@ namespace SeapowerMultiplayer
             OrderSyncHelper.Postfix(__instance, Msg(__instance, geoPos));
     }
 
+    // ── Attack / sonobuoy-drop waypoint intercept (bidirectional) ───────────
+    //
+    // EVERY player-issued sonobuoy drop lands here, not on the engage-task paths:
+    // AttackingState (single, shift-chained and Ctrl/Alt pattern drops) and
+    // SonobuoyLineState (line drops) all funnel through OffsetAttack →
+    // SetAttackAtWaypointTask, which builds the AttackAtWaypoint task itself - it
+    // never calls setWaypointTask, InsertEngageTask, AttackTask or DropSonobuoyTask,
+    // so none of the existing hooks saw it. The client's drops therefore stayed
+    // local: the host's helicopter never got the waypoints and never dropped, while
+    // the RemoveWaypoints call the drop UI makes first (which IS synced) wiped the
+    // helo's real route host-side. Air-dropped torpedoes and waypoint-edit attacks
+    // take the same path and were broken the same way.
+    //
+    // Geo coordinates go on the wire unconverted (same as MoveTo) - mode-independent
+    // and floating-origin safe. The client keeps its local copy for map display; its
+    // execution is suppressed by Patch_V2_AttackAtWaypoint_Suppress.
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.SetAttackAtWaypointTask),
+        new[] { typeof(string), typeof(ObjectBase), typeof(GeoPosition), typeof(GeoPosition),
+                typeof(int), typeof(VisualActionTask), typeof(EngageTask.SalvoType),
+                typeof(float), typeof(bool), typeof(bool) })]
+    public static class Patch_ObjectBase_SetAttackAtWaypointTask
+    {
+        static PlayerOrderMessage Msg(ObjectBase u, string ammunitionName, ObjectBase targetObject,
+            GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition, int salvo,
+            EngageTask.SalvoType salvoType, float areaRadius, bool formationAttack, bool attackOnlyDetected)
+            => new PlayerOrderMessage
+            {
+                SourceEntityId = u.UniqueID,
+                Order          = OrderType.AttackAtWaypoint,
+                AmmoId         = ammunitionName ?? "",
+                ShotsToFire    = salvo,
+                TargetEntityId = targetObject != null ? targetObject.UniqueID : 0,
+                DestX          = (float)waypointGeoPosition._longitude,
+                DestY          = (float)waypointGeoPosition._height,
+                DestZ          = (float)waypointGeoPosition._latitude,
+                TargetX        = (float)targetGeoPosition._longitude,
+                TargetY        = (float)targetGeoPosition._height,
+                TargetZ        = (float)targetGeoPosition._latitude,
+                // The message is out of float fields, so the two attack flags ride in
+                // the high bits of the salvo type. They are only ever non-default on
+                // the WaypointData (mission/save import) overload, but dropping them
+                // would silently change what the host's task does.
+                Speed          = (int)salvoType
+                                 | (formationAttack    ? 0x100 : 0)
+                                 | (attackOnlyDetected ? 0x200 : 0),
+                Heading        = areaRadius,
+            };
+
+        static bool Prefix(ObjectBase __instance, ref AttackAtWaypoint __result,
+                           string ammunitionName, ObjectBase targetObject,
+                           GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition,
+                           int salvo, EngageTask.SalvoType salvoType, float areaRadius,
+                           bool formationAttack, bool attackOnlyDetected)
+        {
+            if (OrderSyncHelper.Prefix(__instance, Msg(__instance, ammunitionName, targetObject,
+                    targetGeoPosition, waypointGeoPosition, salvo, salvoType, areaRadius,
+                    formationAttack, attackOnlyDetected)))
+                return true;
+
+            __result = null; // refused (ally lock / not ours) - callers null-check
+            return false;
+        }
+
+        static void Postfix(ObjectBase __instance,
+                            string ammunitionName, ObjectBase targetObject,
+                            GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition,
+                            int salvo, EngageTask.SalvoType salvoType, float areaRadius,
+                            bool formationAttack, bool attackOnlyDetected)
+            => OrderSyncHelper.Postfix(__instance, Msg(__instance, ammunitionName, targetObject,
+                targetGeoPosition, waypointGeoPosition, salvo, salvoType, areaRadius,
+                formationAttack, attackOnlyDetected));
+    }
+
 
     // ── Waypoint delete / clear sync (bidirectional) ──────────────────────
 
@@ -1082,9 +1155,10 @@ namespace SeapowerMultiplayer
     //
     // DropSonobuoyTask.OnExecute also calls the inlined AddEngageTask directly, but
     // on a DIFFERENT method than AttackTask.OnExecute, so the bearing-fire hook above
-    // never covers it (flagged gap). The player's normal sonobuoy drops route through
-    // AttackTask (covered); this closes the Order.Type.DropSonobuoy task path so any
-    // client-issued sonobuoy drop is forwarded too. Same shape as the AttackTask hook
+    // never covers it (flagged gap). The player's own drops do NOT come through here -
+    // they are AttackAtWaypoint tasks (see Patch_ObjectBase_SetAttackAtWaypointTask);
+    // this closes the Order.Type.DropSonobuoy path, which is how scripted and AI
+    // sonobuoy orders arrive. Same shape as the AttackTask hook
     // - forward the drop, let OnExecute run for the order-log/finish(), then strip the
     // locally-appended task. Unlike AttackTask, this path never uses InsertEngageTask
     // for targeted drops either, so we forward both targeted and bearing cases. The
@@ -1533,6 +1607,11 @@ namespace SeapowerMultiplayer
                 // A depth/altitude slider commit is one deliberate player action, never
                 // a per-frame call - and it has no shared cache slot to keep current.
                 case OrderType.SetHeightCustom:
+                // Each attack/drop waypoint is its own discrete task. A pattern or
+                // line drop issues several in one click whose only differing fields
+                // are the positions, which the default fingerprint ignores - dedup
+                // would collapse the whole pattern down to its first buoy.
+                case OrderType.AttackAtWaypoint:
                     return true;
             }
 
