@@ -507,6 +507,52 @@ namespace SeapowerMultiplayer
     }
 
 
+    // ── Formation control mode (bidirectional) ─────────────────────────────
+    //
+    // SelectedControlMode decides whether an attack order reaches the whole flight
+    // or only the unit clicked. It is read in two places that matter here: the UI
+    // distributes the order across the formation's stations at click time
+    // (AttackingState.NormalAttack), and the host re-reads it when it runs the
+    // formation attack distribution itself (AttackAtWaypoint.AttackCalculations).
+    // Nothing synced it, so a flight the client set to "Follow Leader" was still
+    // whatever the host's copy happened to hold, and the wingmen were left out of
+    // orders given to their leader.
+    //
+    // Keyed on the leader unit: formations carry no id of their own, and the leader
+    // is already replicated with the formation at spawn. The send verdict is
+    // deliberately ignored - a refused write still happens locally (blocking it
+    // would leave a foreign formation with no mode at all while it forms up), it
+    // just does not travel. OrderSyncHelper's own refusal tag is consumed by the
+    // paired Postfix, so nothing is broadcast that was refused.
+    [HarmonyPatch(typeof(UnitFormation), "set_SelectedControlMode")]
+    public static class Patch_UnitFormation_SelectedControlMode
+    {
+        static ObjectBase? Leader(UnitFormation f) => f?.LeaderStation?.UnitObject;
+
+        static PlayerOrderMessage Msg(ObjectBase leader, UnitFormation.ControlMode mode) =>
+            new PlayerOrderMessage
+            {
+                SourceEntityId = leader.UniqueID,
+                Order          = OrderType.SetFormationMode,
+                Speed          = (int)mode,
+            };
+
+        static void Prefix(UnitFormation __instance, UnitFormation.ControlMode value)
+        {
+            var leader = Leader(__instance);
+            if (leader == null || leader.UniqueID == 0) return;
+            OrderSyncHelper.Prefix(leader, Msg(leader, value));
+        }
+
+        static void Postfix(UnitFormation __instance, UnitFormation.ControlMode value)
+        {
+            var leader = Leader(__instance);
+            if (leader == null || leader.UniqueID == 0) return;
+            OrderSyncHelper.Postfix(leader, Msg(leader, value));
+        }
+    }
+
+
     // ── Waypoint delete / clear sync (bidirectional) ──────────────────────
 
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.RemoveWaypoints))]
@@ -1417,6 +1463,22 @@ namespace SeapowerMultiplayer
             _refusalPending = false;
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (SessionManager.SceneLoading) return true; // don't send during scene load
+            // Weapons never produce orders worth sending, in EITHER mode. Under v2 the
+            // host simulates every missile, torpedo, decoy and chaff round and streams
+            // the result; anything a weapon does to itself is internal mechanics whose
+            // waypoints and ids mean nothing on the other machine.
+            //
+            // This used to be scoped to PvP, which left co-op broadcasting a
+            // RemoveWaypoints order for every round that DIED: setDestroyedFlag clears
+            // a unit's waypoints as part of teardown (ObjectBase.cs:5514), so each
+            // expiring chaff round, Harpoon, Mk46 and ASROC sent one. A single session
+            // log showed 6,889 of them - two thirds of every line in the file.
+            //
+            // Asked before the ownership gates, not after: a weapon must never be
+            // REFUSED either. The call site is its own destruction, so refusing left a
+            // dying weapon holding its task list, and each refusal logged under a fresh
+            // entity id (3,663 lines in that same log) because every round is new.
+            if (unit is WeaponBase) return true;
             // Client: units we don't own are host-driven replicas. An order reaching
             // here for one came from our own local sim (unit state machines tick
             // outside the suppressed AI class) - block it locally AND upstream.
@@ -1429,23 +1491,6 @@ namespace SeapowerMultiplayer
                 // suppression of orders the player never issued.
                 UnitLockManager.NoteOrderRefused(unit);
                 return Refuse(msg, "allyLock");
-            }
-            // PvP: don't sync orders for weapons (missiles/torpedoes) - their internal
-            // waypoint/guidance operations use local IDs meaningless to the remote side
-            if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
-            // Fix #54 (enhanced Fix #49): Skip order routing for chaff/countermeasure entities.
-            // Primary check: ammunition type (covers initialized entities).
-            // Fallback check: class name (covers entities where _ap is null during spawn).
-            if (unit is WeaponBase wb)
-            {
-                if (wb._ap != null &&
-                    (wb._ap._type == Ammunition.Type.Chaff || wb._ap._type == Ammunition.Type.Noisemaker))
-                    return true;
-
-                // Fallback: check by class name when _ap is not yet initialized
-                string typeName = unit.GetType().Name;
-                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
-                    return true;
             }
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!TaskforceAssignmentManager.ClientMayControl(unit)) return Refuse(msg, "notMyTaskforce");
@@ -1497,19 +1542,8 @@ namespace SeapowerMultiplayer
             if (!Plugin.Instance.CfgIsHost.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (OrderHandler.ApplyingFromNetwork) return;
-            // PvP: don't sync orders for weapons (missiles/torpedoes)
-            if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return;
-            // Fix #54 (enhanced Fix #49): Same chaff/noisemaker filter as Prefix
-            if (unit is WeaponBase wb2)
-            {
-                if (wb2._ap != null &&
-                    (wb2._ap._type == Ammunition.Type.Chaff || wb2._ap._type == Ammunition.Type.Noisemaker))
-                    return;
-
-                string typeName = unit.GetType().Name;
-                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
-                    return;
-            }
+            // Weapons are host-simulated and streamed in both modes - see Prefix.
+            if (unit is WeaponBase) return;
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
             if (!OrderDeduplicator.ShouldSend(msg)) return; // duplicate - skip broadcast
             NetworkManager.Instance.BroadcastToClients(msg);
@@ -1607,6 +1641,10 @@ namespace SeapowerMultiplayer
                 // A depth/altitude slider commit is one deliberate player action, never
                 // a per-frame call - and it has no shared cache slot to keep current.
                 case OrderType.SetHeightCustom:
+                // Formation ops are discrete commands whose meaning is in the opcode,
+                // not in Speed/Heading - the default fingerprint cannot tell two
+                // different ops apart, and repeating one (rejoin, recall) is normal.
+                case OrderType.FormationCommand:
                 // Each attack/drop waypoint is its own discrete task. A pattern or
                 // line drop issues several in one click whose only differing fields
                 // are the positions, which the default fingerprint ignores - dedup
