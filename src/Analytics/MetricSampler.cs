@@ -42,6 +42,7 @@ namespace SeapowerMultiplayer
 
         // Deltas
         private static long _prevBytesIn, _prevBytesOut;
+        private static long _prevErrors, _prevWarnings;
         private static readonly Dictionary<string, long> _prevCounters = new();
 
         internal static void Reset()
@@ -53,6 +54,8 @@ namespace SeapowerMultiplayer
             _ftSum = _ftWorst = 0f; _ftFrames = _hitches = 0;
             _prevBytesIn = Telemetry.TotalBytesIn;
             _prevBytesOut = Telemetry.TotalBytesOut;
+            _prevErrors = Analytics.ErrorCount;
+            _prevWarnings = Analytics.WarningCount;
             _prevCounters.Clear();
             foreach (var kv in Telemetry.Counters) _prevCounters[kv.Key] = kv.Value;
         }
@@ -141,6 +144,13 @@ namespace SeapowerMultiplayer
             j.Num("hitch", _hitches);
             j.Num("mem", GC.GetTotalMemory(false) / (1024 * 1024));
             _ftSum = _ftWorst = 0f; _ftFrames = _hitches = 0;
+
+            // Errors and warnings raised during this window. Cumulative counters
+            // diffed here, so a spike lands on the snapshot it happened in and
+            // can be plotted against mission time rather than only wall clock.
+            long errs = Analytics.ErrorCount, warns = Analytics.WarningCount;
+            j.Num("err", errs - _prevErrors).Num("warn", warns - _prevWarnings);
+            _prevErrors = errs; _prevWarnings = warns;
 
             // ── Sync health ──────────────────────────────────────────────────
             j.Sub("drift")

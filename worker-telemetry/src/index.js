@@ -10,6 +10,8 @@
 // written to Analytics Engine so the aggregate questions ("did 0.3.6 reduce
 // drift?") can be answered in SQL without downloading blobs.
 
+import { renderDashboard } from './dashboard.js';
+
 const MAX_BODY = 512 * 1024;          // matches AnalyticsUploader.MaxBatchBytes
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 const HEX_RE = /^[0-9a-f]{8,64}$/;
@@ -27,6 +29,34 @@ export default {
     if (request.method === 'GET' && url.pathname === '/v1/health') {
       return new Response(JSON.stringify({ ok: true }), {
         headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/dash') {
+      // Player diagnostics are behind this page, so it is never public. Basic
+      // auth over HTTPS is the floor; put Cloudflare Access in front if you want
+      // SSO. Absent DASH_PASSWORD the route is disabled rather than open.
+      if (!env.DASH_PASSWORD) return fail(404);
+      if (!checkBasicAuth(request, env.DASH_PASSWORD)) {
+        return new Response('Authentication required', {
+          status: 401,
+          headers: { 'WWW-Authenticate': 'Basic realm="spmp", charset="UTF-8"' },
+        });
+      }
+      if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+        return new Response(
+          'Dashboard needs CF_ACCOUNT_ID (var) and CF_API_TOKEN (secret, Account Analytics:Read).',
+          { status: 500, headers: { 'Content-Type': 'text/plain' } });
+      }
+      const html = await renderDashboard(env, parseInt(url.searchParams.get('days') || '14', 10));
+      return new Response(html, {
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          // The page inlines its own CSS/JS and talks to nothing else.
+          'Content-Security-Policy':
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:",
+        },
       });
     }
 
@@ -111,9 +141,19 @@ export default {
       return fail(500);
     }
 
+    let metrics = 0;
     if (env.AE && text && header) {
-      try { writeMetrics(env, request, header, text); } catch { /* never fail ingest on AE */ }
+      try { metrics = writeMetrics(env, request, header, text); }
+      catch (err) { console.log(`AE write failed: ${err.message}`); }   // never fail ingest on AE
     }
+
+    // Visible in `wrangler dev` and `wrangler tail`. Without it, "nothing in
+    // Analytics Engine" is ambiguous between no binding, no metric lines in the
+    // batch, and AE simply not being emulated locally.
+    console.log(
+      `ingest ${key} bytes=${raw.byteLength} decoded=${text ? 'yes' : 'no'} ` +
+      `metricLines=${metrics} ae=${env.AE ? 'bound' : 'MISSING'} trig=${header?.trig ?? '?'}`
+    );
 
     // Fatal lines are worth a Discord ping so they surface without anyone
     // querying R2. Best-effort, and never blocks the response.
@@ -124,6 +164,19 @@ export default {
     return noContent();
   },
 };
+
+/** Any username; the password is the secret. Length-independent compare. */
+function checkBasicAuth(request, expected) {
+  const header = request.headers.get('authorization') || '';
+  if (!header.startsWith('Basic ')) return false;
+  let decoded;
+  try { decoded = atob(header.slice(6)); } catch { return false; }
+  const supplied = decoded.slice(decoded.indexOf(':') + 1);
+  if (supplied.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= supplied.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
+}
 
 async function checkLimits(env, request, installId) {
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
@@ -160,11 +213,13 @@ function firstJsonLine(text) {
 // Analytics Engine limits: 1 index (must be LOW cardinality - it is the
 // sampling key), 20 blobs, 20 doubles.
 function writeMetrics(env, request, header, text) {
+  let written = 0;
   for (const line of text.split('\n')) {
     if (!line.startsWith('{"t":"m"')) continue;
 
     let m;
     try { m = JSON.parse(line); } catch { continue; }
+    written++;
 
     const rtt = m.rtt || {}, fps = m.fps || {}, drift = m.drift || {}, perr = m.perr || {};
 
@@ -177,26 +232,35 @@ function writeMetrics(env, request, header, text) {
         header.mode || '', String(header.trig || ''), m.hs || '', m.sim || '',
         request.headers.get('cf-ipcountry') || '',
       ],
+      // ── The 20 doubles. Order is a CONTRACT: changing it re-labels every
+      // historical row, because Analytics Engine stores positions, not names.
+      // Only ever change this on a clean dataset, or accept that old rows lie.
+      //
+      // Not seated, and why - all still present in the R2 blob:
+      //   w        constant 10 s, carries nothing
+      //   mem      coarse GC number, has never explained a bug
+      //   rtt.mx   a single worst packet; p95 is the honest tail
+      //   drift.sm same, for drift - the average is the signal
       doubles: [
-        num(rtt.a), num(rtt.p95), num(rtt.mx), num(m.loss),
+        num(rtt.a), num(rtt.p95), num(m.loss),
         num(m.bin), num(m.bout), num(m.sfmx),
-        // Two of the 20 slots go to mission time, which is worth what it cost:
-        //   mis   - shared sync clock (time of day). Host and client agree on
-        //           it, so it is the key that joins the two sides of a session.
-        //           Wall-clock ts only matches if both PCs' clocks do.
-        //   misEl - mission elapsed. Per-machine baseline, so it does NOT align
-        //           across players, but it is the only thing that says how far
-        //           into a mission a row sits. Not derivable from real time at
-        //           compression.
-        // Displaced: `w` (constant 10 s) and `mem` (coarse GC number that has
-        // never explained a bug). Both are still in the R2 blob.
-        num(fps.a), num(fps.mn), num(m.hitch), num(m.mis),
-        num(drift.sa), num(drift.sm), num(drift.aa),
+        num(fps.a), num(fps.mn), num(m.hitch),
+        // mis   - shared sync clock (time of day). Both machines agree on it,
+        //         so it joins the two sides of one session; wall-clock ts only
+        //         matches if both PCs' clocks do.
+        num(m.mis),
+        num(drift.sa), num(drift.aa),
         num(perr.sa), num(perr.aa),
-        num(m.jit), num(m.cad), num(m.rep), num(m.misEl),
+        num(m.jit), num(m.cad), num(m.rep),
+        // misEl - mission elapsed, per-machine baseline. Does not align across
+        //         players, but it is the only thing saying how far into a
+        //         mission a row sits - underivable from real time at compression.
+        num(m.misEl),
+        num(m.err), num(m.warn),
       ],
     });
   }
+  return written;
 }
 
 const num = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);

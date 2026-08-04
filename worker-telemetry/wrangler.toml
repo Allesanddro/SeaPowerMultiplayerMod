@@ -32,6 +32,11 @@ simple = { limit = 300, period = 60 }
 [observability]
 enabled = true
 
+# Account IDs are not secret - this one already appears in wrangler output and
+# in API error messages. The token that goes with it is a secret (below).
+[vars]
+CF_ACCOUNT_ID = "f8f77709a65631885574159c6736502a"
+
 # Secrets (npx wrangler secret put <NAME>):
 #   DISCORD_WEBHOOK_URL - optional; fatal errors get posted there
 # Vars:

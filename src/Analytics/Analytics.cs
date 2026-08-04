@@ -272,6 +272,12 @@ namespace SeapowerMultiplayer
 
         internal static void NoteWarning() => System.Threading.Interlocked.Increment(ref _warnings);
 
+        /// <summary>Cumulative since session start. MetricSampler diffs these to
+        /// get a per-window count; both are written from arbitrary threads, so
+        /// read them through Interlocked too.</summary>
+        internal static long ErrorCount   => System.Threading.Interlocked.Read(ref _errors);
+        internal static long WarningCount => System.Threading.Interlocked.Read(ref _warnings);
+
         // ── Payload framing ──────────────────────────────────────────────────
 
         /// <summary>First line of every batch. Built on the uploader thread, so it
