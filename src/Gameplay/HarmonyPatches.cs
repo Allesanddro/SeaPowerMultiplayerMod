@@ -180,11 +180,16 @@ namespace SeapowerMultiplayer
         new[] { typeof(ObjectBase), typeof(WeaponParameters), typeof(UnityEngine.GameObject), typeof(ObjectBaseParameters) })]
     public static class Patch_WeaponSystemCIWS_Ctor
     {
+        // This used to also require SessionManager.SceneLoading, which is set only
+        // around OUR load paths - so a host pressing Play Mission through the game's own
+        // menu, outside a session, still lost the load coroutine to the same NRE. The
+        // gate bought nothing: this is a constructor finalizer that only ever swallows
+        // NREs, and letting one through has no upside at any point in the mod's life.
         static Exception? Finalizer(Exception __exception)
         {
-            if (SessionManager.SceneLoading && __exception is NullReferenceException)
+            if (__exception is NullReferenceException)
             {
-                Plugin.Log.LogWarning("[Patch] WeaponSystemCIWS NRE suppressed during scene load");
+                Plugin.Log.LogWarning("[Patch] WeaponSystemCIWS NRE suppressed");
                 return null;
             }
             return __exception;
@@ -1584,6 +1589,40 @@ namespace SeapowerMultiplayer
         /// 0 = air search radar, 1 = surface search radar.
         /// Sonar active/passive is handled separately via the IsActive subscription.
         /// </summary>
+        /// <summary>The message for a SensorSystem.Enable/Disable, or null if that
+        /// sensor does not sync this way.
+        ///
+        /// Radars go by group, as they always have. SONARS go by index: deploying a
+        /// towed array, VDS or dipping sonar is a plain Enable() on a SensorSystemSonar,
+        /// which the radar-group test rejected outright - so a client's deploy never
+        /// reached the host, and SensorStateManager.ClientReassert then re-imposed the
+        /// host's mask half a second later and visibly flipped the switch back. There is
+        /// no group to put them in (a unit can carry several, deployed independently),
+        /// and this is the same addressing SensorStateManager's bitmask already relies
+        /// on: position in _obp._sensorSystems, the same list in the same order on both
+        /// machines because both build it from the same ini.
+        ///
+        /// Deploy FEASIBILITY is not decided here - TowedSystem.OnFixedUpdate runs
+        /// host-side and governs whether the array actually streams.</summary>
+        internal static PlayerOrderMessage? SensorEnableMsg(SensorSystem sensor, ObjectBase unit, bool enable)
+        {
+            int group = GetRadarGroup(sensor, unit);
+            if (group >= 0) return SensorMsg(unit, group, enable);
+
+            if (!(sensor is SensorSystemSonar)) return null;
+            var sensors = unit._obp?._sensorSystems;
+            if (sensors == null) return null;
+
+            for (int i = 0; i < sensors.Count; i++)
+            {
+                if (!ReferenceEquals(sensors[i], sensor)) continue;
+                var msg = SensorMsg(unit, 3, enable);
+                msg.ShotsToFire = i;
+                return msg;
+            }
+            return null;
+        }
+
         internal static int GetRadarGroup(SensorSystem sensor, ObjectBase unit)
         {
             if (!(sensor is SensorSystemRadar radar)) return -1;
@@ -1720,7 +1759,12 @@ namespace SeapowerMultiplayer
             int subKey = msg.Order switch
             {
                 OrderType.EditWaypoint => (int)msg.Speed,   // waypoint index
-                OrderType.SensorToggle => (int)msg.Heading, // sensor group
+                // Sensor group - except group 3, which addresses ONE sensor by index and
+                // so has to carry the index into the key. On the group alone, deploying a
+                // towed array and then a VDS within the rate floor would see the second
+                // as a duplicate of the first and drop it.
+                OrderType.SensorToggle => (int)msg.Heading == 3 ? 1000 + msg.ShotsToFire
+                                                                : (int)msg.Heading,
                 _ => 0,
             };
             // Preset and custom speed are the same setting reached two ways, so they
@@ -1832,10 +1876,10 @@ namespace SeapowerMultiplayer
             var unit = __instance._baseObject;
             if (unit == null) return true;
 
-            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
-            if (group < 0) return true;
+            var msg = OrderSyncHelper.SensorEnableMsg(__instance, unit, true);
+            if (msg == null) return true;
 
-            return OrderSyncHelper.Prefix(unit, OrderSyncHelper.SensorMsg(unit, group, true));
+            return OrderSyncHelper.Prefix(unit, msg);
         }
 
         static void Postfix(SensorSystem __instance)
@@ -1848,10 +1892,10 @@ namespace SeapowerMultiplayer
             var unit = __instance._baseObject;
             if (unit == null) return;
 
-            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
-            if (group < 0) return;
+            var msg = OrderSyncHelper.SensorEnableMsg(__instance, unit, true);
+            if (msg == null) return;
 
-            OrderSyncHelper.Postfix(unit, OrderSyncHelper.SensorMsg(unit, group, true));
+            OrderSyncHelper.Postfix(unit, msg);
         }
     }
 
@@ -1866,10 +1910,10 @@ namespace SeapowerMultiplayer
             var unit = __instance._baseObject;
             if (unit == null) return true;
 
-            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
-            if (group < 0) return true;
+            var msg = OrderSyncHelper.SensorEnableMsg(__instance, unit, false);
+            if (msg == null) return true;
 
-            return OrderSyncHelper.Prefix(unit, OrderSyncHelper.SensorMsg(unit, group, false));
+            return OrderSyncHelper.Prefix(unit, msg);
         }
 
         static void Postfix(SensorSystem __instance)
@@ -1882,10 +1926,10 @@ namespace SeapowerMultiplayer
             var unit = __instance._baseObject;
             if (unit == null) return;
 
-            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
-            if (group < 0) return;
+            var msg = OrderSyncHelper.SensorEnableMsg(__instance, unit, false);
+            if (msg == null) return;
 
-            OrderSyncHelper.Postfix(unit, OrderSyncHelper.SensorMsg(unit, group, false));
+            OrderSyncHelper.Postfix(unit, msg);
         }
     }
 
@@ -2647,6 +2691,12 @@ namespace SeapowerMultiplayer
                 TargetEntityId = targetObject?.UniqueID ?? 0,
             };
 
+            // Both halves. Postfix alone is the HOST's broadcast branch - it returns
+            // immediately for !CfgIsHost - so on a client this whole patch used to be a
+            // no-op and an RTB order never reached the authoritative sim: the order text
+            // flipped locally for a fraction of a second until the host's replicated
+            // state overwrote it, and the two order stacks disagreed from then on.
+            if (!OrderSyncHelper.Prefix(__instance, msg)) return;
             OrderSyncHelper.Postfix(__instance, msg);
         }
     }

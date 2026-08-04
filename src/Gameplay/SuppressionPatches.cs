@@ -3,6 +3,7 @@ using HarmonyLib;
 using SeaPower;
 using SeaPowerAI;
 using SeapowerMultiplayer.Messages;
+using SubmarineStates;
 using UnityEngine;
 
 namespace SeapowerMultiplayer
@@ -313,6 +314,96 @@ namespace SeapowerMultiplayer
     {
         static bool Prefix(ObjectBase ____baseObject) =>
             !Suppression.HostSuppressesRemoteTfAi(____baseObject);
+    }
+
+    /// <summary>HOST-side PvP: the two submarine crew behaviours that are NOT states.
+    ///
+    /// Both are plain calls in Submarine.OnFixedUpdate (:523 and :527), gated on
+    /// <c>!IsPlayerObject</c> - so the game denies them to a player's own boat and runs
+    /// them on the remote player's. Skipping them is parity, not a restriction.
+    ///
+    /// ApplyWirePreservationLimits is the one that hurts: it overwrites SpeedCommand
+    /// with a torpedo-wire speed limit AND raises DesiredAltitude to a minimum safe
+    /// depth, every fixed tick, for as long as the boat has torpedoes on the wire. A
+    /// relayed speed or depth order lands, gets silently overwritten before the player
+    /// sees it move, and reads as "my order did nothing" with no trace on either
+    /// machine. HoldCuedFiringConnection is the same shape, holding the boat shallow to
+    /// keep a cued firing connection.</summary>
+    [HarmonyPatch(typeof(Submarine), "ApplyWirePreservationLimits")]
+    public static class Patch_V2_RemoteTf_WireLimits_Suppress
+    {
+        static bool Prefix(Submarine __instance) =>
+            !Suppression.HostSuppressesRemoteTfAi(__instance);
+    }
+
+    [HarmonyPatch(typeof(Submarine), "HoldCuedFiringConnection")]
+    public static class Patch_V2_RemoteTf_CuedFiringHold_Suppress
+    {
+        static bool Prefix(Submarine __instance) =>
+            !Suppression.HostSuppressesRemoteTfAi(__instance);
+    }
+
+    /// <summary>HOST-side PvP: give the remote player's aircraft the answer their owner
+    /// gets. CanUseAIStates reads <c>IsPlayerObject ? Globals.useExperimentalAircraftAI
+    /// : true</c>, and it is the sole gate on the two AirborneEarlyWarningLine
+    /// transitions - so on the host the remote player's AEW aircraft fly a search
+    /// pattern their owner's machine would never have started.</summary>
+    [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.CanUseAIStates), MethodType.Getter)]
+    public static class Patch_V2_RemoteTf_AircraftAiStates
+    {
+        static void Postfix(Aircraft __instance, ref bool __result)
+        {
+            if (!__result) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
+            __result = Globals.useExperimentalAircraftAI;
+        }
+    }
+
+    /// <summary>HOST-side PvP: keep the remote player's submarines out of the crew's
+    /// automatic TORPEDO EVASION.
+    ///
+    /// This is not a restriction, it is parity. The transition is registered as
+    ///
+    ///   AtAny(_state_torpedoEvasion, () =&gt; Globals._testIsUnitDefenseActive
+    ///        &amp;&amp; ThreatingTorpedo != null
+    ///        &amp;&amp; (DM._subAIAppliesToPlayer || !IsPlayerObject)
+    ///        &amp;&amp; CurrentState.Priority &gt; _state_torpedoEvasion.Priority);
+    ///
+    /// (Submarine.cs:248), and DM._subAIAppliesToPlayer is off by default - so in single
+    /// player a player's own boat NEVER enters this state and the player evades the
+    /// torpedo themselves. On the host the remote player's submarines are not player
+    /// objects, so the crew took the boat: depth, telegraph and heading all driven by
+    /// TorpedoEvasion, with "Evading Torpedo" replicated to its owner through
+    /// UnitStatusManager while their own controls did nothing.
+    ///
+    /// Wrapping the PREDICATE rather than blocking the state: a state that is entered
+    /// and then refused has no way back out (TorpedoEvasion.IsFinished is set by its own
+    /// update, which we would also have to skip), so the boat would strand in it. The
+    /// registration runs once per submarine in initStates and the added test is
+    /// evaluated per tick, so it costs nothing and follows the session in and out.
+    ///
+    /// Automatic noisemaker launches go with it - they are part of this state, and a
+    /// player's own boat does not get them either. The separate auto-defence path that
+    /// Globals._testIsUnitDefenseActive gates is untouched.</summary>
+    [HarmonyPatch(typeof(StateMachine), nameof(StateMachine.addAnyTransition))]
+    public static class Patch_V2_RemoteTf_TorpedoEvasion_Suppress
+    {
+        private static readonly AccessTools.FieldRef<TorpedoEvasion, Submarine>? _subRef =
+            AccessTools.FieldRefAccess<TorpedoEvasion, Submarine>("_submarine");
+
+        static void Prefix(IState state, ref System.Func<bool> predicate)
+        {
+            if (!(state is TorpedoEvasion evasion) || predicate == null) return;
+            if (_subRef == null)
+            {
+                Plugin.Log.LogWarning("[Suppression] TorpedoEvasion._submarine not found - the " +
+                                      "remote player's submarines will keep evading torpedoes on their own");
+                return;
+            }
+
+            var inner = predicate;
+            predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(_subRef(evasion));
+        }
     }
 
     /// <summary>Mission-level AI (behaviour-tree pump: scripted spawns, third-party

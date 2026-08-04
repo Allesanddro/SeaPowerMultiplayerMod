@@ -38,6 +38,7 @@ namespace SeapowerMultiplayer.Messages
         RequestIdentify  = 30, // co-op: "request: identify yourself" (Source=asking unit, Target=contact)
         SetFormationMode = 31, // UnitFormation.SelectedControlMode (Source=leader unit, Speed=ControlMode)
         FormationCommand = 32, // formation membership/shape/orders - ShotsToFire = FormationOp
+        AttackTarget    = 33,  // "attack that contact" designation (TargetEntityId, 0 = clear)
     }
 
     /// <summary>

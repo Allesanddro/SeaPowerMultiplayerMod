@@ -679,6 +679,20 @@ namespace SeapowerMultiplayer
                             case 1: if (enable) unit.EnableSurfaceSearchRadars(); else unit.DisableSurfaceSearchRadars(); break;
                             case 2: if (enable) unit.EnableActiveSonars(); else unit.DisableActiveSonars(); break;
 
+                            // Group 3: one sensor, addressed by its index in
+                            // _obp._sensorSystems - towed array / VDS / dipping sonar
+                            // deployment, which is a SensorSystem.Enable rather than
+                            // anything the group methods reach.
+                            case 3:
+                            {
+                                var sensors = unit._obp?._sensorSystems;
+                                int idx = msg.ShotsToFire;
+                                if (sensors == null || idx < 0 || idx >= sensors.Count) break;
+                                var sensor = sensors[idx];
+                                if (sensor == null) break;
+                                if (enable) sensor.Enable(); else sensor.Disable();
+                                break;
+                            }
                         }
                         break;
                     }
@@ -748,6 +762,10 @@ namespace SeapowerMultiplayer
                         Plugin.Log.LogInfo($"[Sonobuoy] Applied drop: unit={unit.UniqueID} ammo={msg.AmmoId}");
                         break;
                     }
+
+                    case Messages.OrderType.AttackTarget:
+                        AttackDesignationSync.Apply(unit, msg);
+                        break;
 
                     case Messages.OrderType.FormationCommand:
                         ApplyFormationCommand(unit, msg);
