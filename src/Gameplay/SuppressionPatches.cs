@@ -39,6 +39,20 @@ namespace SeapowerMultiplayer
             && tf != null
             && tf == Globals._enemyTaskforce;
 
+        /// <summary>HOST-side PvP: the remote player's fleet, tested WITHOUT requiring
+        /// the transport to be up. Spawn-time stamps run while the mission loads, which
+        /// on the host can be before it starts listening - but from the host's own
+        /// configuration the enemy taskforce is the other player's fleet either way.
+        /// Use this ONLY for those load-time corrections; anything that acts during a
+        /// live battle should ask <see cref="HostSuppressesRemoteTfAi(ObjectBase)"/>,
+        /// which additionally requires a session.</summary>
+        internal static bool RemotePlayerFleet(ObjectBase? unit) =>
+            Plugin.Instance.CfgIsHost.Value
+            && Plugin.Instance.CfgPvP.Value
+            && unit != null
+            && unit._taskforce != null
+            && unit._taskforce == Globals._enemyTaskforce;
+
         /// <summary>CLIENT-side: true for a unit the local player does not own -
         /// the opposing side in PvP, the AI sides in co-op. The per-unit AI class
         /// is suppressed on the client, but Vessel/Submarine tick their OWN state
@@ -234,6 +248,73 @@ namespace SeapowerMultiplayer
     // narrower than the AI a player's own units have in single player. Weapon
     // status is the intended control for this, not taskforce ownership.
 
+    /// <summary>HOST-side PvP: the submarine cruise-missile pipeline.
+    ///
+    /// This is the one part of the offensive AI that weapon status cannot govern. Every
+    /// pass in it opens with the same test - <c>if (!DM._subAIAppliesToPlayer &amp;&amp;
+    /// _baseObject.IsPlayerObject) return;</c> - so the game NEVER runs it for a
+    /// player's own boats, at any weapon status. On the host the remote player's
+    /// submarines are not player objects, so it ran: their boats picked classified
+    /// contacts off the taskforce plot and volleyed cruise missiles at full weapon
+    /// range while their owner sat at weapons tight. Skipping these IS the player-fleet
+    /// behaviour, not a restriction on top of it.
+    ///
+    /// The three target passes CLEAR their list and then conditionally refill it (the
+    /// auto pass clears it in exactly the branch a player's own boat takes), so a bare
+    /// prefix-skip would strand whatever the list already held and keep authorising
+    /// fire from it. Each one clears before refusing.</summary>
+    [HarmonyPatch(typeof(AI), nameof(AI.UpdateAutoCruiseMissileTargets))]
+    public static class Patch_V2_RemoteTf_AutoCruiseTargets_Suppress
+    {
+        static bool Prefix(AI __instance, ObjectBase ____baseObject)
+        {
+            if (!Suppression.HostSuppressesRemoteTfAi(____baseObject)) return true;
+            __instance._autoSelectedMissileTargets.Clear();
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(AI), nameof(AI.UpdateTaskforceCuedMissileTargets))]
+    public static class Patch_V2_RemoteTf_CuedMissileTargets_Suppress
+    {
+        static bool Prefix(AI __instance, ObjectBase ____baseObject)
+        {
+            if (!Suppression.HostSuppressesRemoteTfAi(____baseObject)) return true;
+            __instance._taskforceCuedMissileTargets.Clear();
+            return false;
+        }
+    }
+
+    /// <summary>A submarine that believes it has been spotted whitelists every closing
+    /// ship for missile fire. Same shape as the two above - the list is cleared first,
+    /// so refusing without clearing would leave the whitelist standing.</summary>
+    [HarmonyPatch(typeof(AI), nameof(AI.UpdateDefensiveMissileTargets))]
+    public static class Patch_V2_RemoteTf_DefensiveMissileTargets_Suppress
+    {
+        static bool Prefix(AI __instance, ObjectBase ____baseObject)
+        {
+            if (!Suppression.HostSuppressesRemoteTfAi(____baseObject)) return true;
+            __instance._defensiveMissileTargets.Clear();
+            return false;
+        }
+    }
+
+    /// <summary>The two firing passes the lists above feed. Nothing to clear - they
+    /// only act.</summary>
+    [HarmonyPatch(typeof(AI), nameof(AI.FireTaskforceCuedMissiles))]
+    public static class Patch_V2_RemoteTf_FireCuedMissiles_Suppress
+    {
+        static bool Prefix(ObjectBase ____baseObject) =>
+            !Suppression.HostSuppressesRemoteTfAi(____baseObject);
+    }
+
+    [HarmonyPatch(typeof(AI), nameof(AI.FireSubmarineMissileVolley))]
+    public static class Patch_V2_RemoteTf_FireMissileVolley_Suppress
+    {
+        static bool Prefix(ObjectBase ____baseObject) =>
+            !Suppression.HostSuppressesRemoteTfAi(____baseObject);
+    }
+
     /// <summary>Mission-level AI (behaviour-tree pump: scripted spawns, third-party
     /// taskforce orders, airstrike scheduling) - host-only.</summary>
     [HarmonyPatch(typeof(AIController), nameof(AIController.OnUpdate))]
@@ -293,6 +374,70 @@ namespace SeapowerMultiplayer
         static bool Prefix(ObjectBase ____baseObject) =>
             !Suppression.HostSuppressesRemoteTfAi(____baseObject)
             && !Suppression.ClientForeignUnit(____baseObject);
+    }
+
+    /// <summary>HOST-side PvP: undo the game's "the other side is AI, so it is weapons
+    /// free" stamp on the remote player's fleet.
+    ///
+    /// SceneCreator reads WeaponStatus from the mission ini - player side defaulting
+    /// Tight, enemy side Free - and then ends unconditionally with
+    /// <c>if (!pvKey.Contains(PlayerSideName)) _weaponStatus = Free;</c>. In single
+    /// player that is just the enemy AI's posture. In save-swap PvP it means the HOST's
+    /// copy of the other player's entire fleet comes up weapons free whatever its owner
+    /// set, and everything downstream then behaves correctly on a false premise: the
+    /// auto-engage passes we deliberately leave running read the forced Free and open
+    /// fire at full weapon range while the owner is on weapons tight.
+    ///
+    /// Tight is the player-side default, and the player side is what this fleet is on
+    /// its owner's machine (only <c>[Mission] PlayerTaskforce/EnemyTaskforce</c> are
+    /// swapped in the client's save - unit sections keep their names and values - so the
+    /// guest reads these same sections through the PLAYER-side path, whose default is
+    /// Tight and which has no forced Free).
+    ///
+    /// Only a value of exactly Free is corrected. The force is the sole writer of Free
+    /// here, so anything else - notably an authored OverrideWeaponStatus of Hold or
+    /// Tight, which the reader applies after the force - is a deliberate choice and is
+    /// left alone. A section that authored Free for that side is indistinguishable from
+    /// a forced one without re-reading the ini, and re-reading it means referencing the
+    /// game's UI assembly for one lookup; the miss errs toward not shooting, which is
+    /// the safe direction and one click for the owner to undo.
+    ///
+    /// Gated on RemotePlayerFleet, not HostSuppressesRemoteTfAi: this runs during the
+    /// mission load, which may precede the host starting to listen.</summary>
+    [HarmonyPatch(typeof(SceneCreator), "SetAdditionalParameters")]
+    public static class Patch_V2_RemoteTf_SpawnWeaponStatus
+    {
+        static void Postfix(ObjectBase unit)
+        {
+            if (unit == null || unit._weaponStatus != ObjectBase.WeaponStatus.Free) return;
+            if (!Suppression.RemotePlayerFleet(unit)) return;
+
+            unit._weaponStatus = ObjectBase.WeaponStatus.Tight;
+            Plugin.Log.LogInfo($"[Suppression] Remote fleet weapon status: {unit.getUIDAndName()} " +
+                               "Free -> Tight (undoing the enemy-side spawn stamp)");
+        }
+    }
+
+    /// <summary>The same stamp, per launch: FlightDeck.launchVehicle writes Free into
+    /// every aircraft it puts up under <c>if (!_baseObject.IsPlayerObject)</c>. A
+    /// player's own deck launches tight; the deck this trips on is the other player's
+    /// carrier as the host sees it.
+    ///
+    /// Tight rather than a recomputed value - a carrier-launched aircraft has no ini
+    /// section of its own to read a status from, and tight is where a player's own
+    /// launches start. If its owner wants them free they say so, and the SetWeaponStatus
+    /// relay carries that across.</summary>
+    [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.launchVehicle))]
+    public static class Patch_V2_RemoteTf_LaunchWeaponStatus
+    {
+        static void Postfix(FlightDeck __instance, ObjectBase __result)
+        {
+            if (__result == null) return;
+            if (!Suppression.RemotePlayerFleet(__instance._baseObject)) return;
+            if (__result._weaponStatus == ObjectBase.WeaponStatus.Tight) return;
+
+            __result._weaponStatus = ObjectBase.WeaponStatus.Tight;
+        }
     }
 
     /// <summary>Attack/sonobuoy-drop waypoints exist on both sides (they sync as
@@ -485,6 +630,26 @@ namespace SeapowerMultiplayer
             Telemetry.Count("v2.clientGunFireUpstream");
             return false;
         }
+    }
+
+    /// <summary>Civilian air/sea traffic routes are host-only, like every other
+    /// spawner. This is also what keeps the guard below from being fatal: the guard
+    /// correctly refuses a client-local aircraft and createAircraft duly returns null,
+    /// but CivilianRoute.SpawnUnit dereferences that return immediately
+    /// (<c>aircraft.DesiredAltitude.Value = ...</c>) and only null-checks further down,
+    /// on the Vessel branch. The throw pre-empts the route's own _failedSpawnCounter,
+    /// so its "50 failures and I disable myself" backstop never runs and it retries
+    /// every frame forever - and because it unwinds out of MissionManager.OnUpdate,
+    /// which sits inside GameUpdater.update(), it takes the rest of that frame's game
+    /// update with it. One 16-minute guest battle logged 8,618 of them, 9.3 MB of
+    /// Player.log, against a clean host log.
+    ///
+    /// Stopping the route rather than null-guarding the spawn: the host runs its own
+    /// copy and the traffic arrives as replicas either way.</summary>
+    [HarmonyPatch(typeof(CivilianRoute), nameof(CivilianRoute.OnUpdate))]
+    public static class Patch_V2_CivilianRoute_Suppress
+    {
+        static bool Prefix() => !Suppression.ClientActive;
     }
 
     /// <summary>The client never creates units on its own - aircraft arrive as

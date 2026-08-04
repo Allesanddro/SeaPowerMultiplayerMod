@@ -1492,6 +1492,10 @@ namespace SeapowerMultiplayer
                 UnitLockManager.NoteOrderRefused(unit);
                 return Refuse(msg, "allyLock");
             }
+            // Formation internals that both machines derive identically - execute, do
+            // not send. Asked AFTER the ownership gates on purpose: those refusals must
+            // still stand, so the client never mutates a unit it does not own.
+            if (FormationInternal.Active) return true;
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!TaskforceAssignmentManager.ClientMayControl(unit)) return Refuse(msg, "notMyTaskforce");
             if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate - skip send, still execute locally
@@ -1539,9 +1543,18 @@ namespace SeapowerMultiplayer
                 return;
             }
 
+            if (FormationInternal.Active) return; // derived formation state - see FormationInternal
             if (!Plugin.Instance.CfgIsHost.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (OrderHandler.ApplyingFromNetwork) return;
+            // PvP: everything still standing here was issued by the HOST - a relayed
+            // order returned on the line above. The host has no business commanding the
+            // other player's fleet, so anything reaching this point for one of their
+            // units came from host-side AI, and broadcasting it changes the remote
+            // player's own switches and orders under them. (Motion is a separate
+            // matter: the host still simulates those ships, so AI that steers them has
+            // to be stopped at the AI itself, not here.)
+            if (Suppression.HostSuppressesRemoteTfAi(unit)) return;
             // Weapons are host-simulated and streamed in both modes - see Prefix.
             if (unit is WeaponBase) return;
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
@@ -2169,6 +2182,33 @@ namespace SeapowerMultiplayer
             if (RpValueField == null) return;
 
             var actualTf = __instance.Object._taskforce;
+
+            // FOG OF WAR. This correction used to run for every vehicle in the table,
+            // which meant writing the contact's TRUE side onto tracks the client's
+            // sensors had not classified - and "classified" IS "UnitTaskforce set", so
+            // the client read every neutral merchant and every enemy warship off a bare
+            // ESM bearing while the host had to work for it. In PvP that also handed the
+            // client the host's order of battle before the host saw theirs.
+            //
+            // Two cases still need it, and only these two:
+            //  - the client's OWN units, whose plotting entries come up with the field
+            //    unset after the side swap. You always know your own ships.
+            //  - tracks the client HAS classified, where the value is merely wrong (the
+            //    stale pre-swap ECS DetectedSide reference) and would paint the map with
+            //    inverted colours. Correcting a side is not revealing one.
+            // An unclassified foreign contact is left exactly as the client's own
+            // sensors left it.
+            //
+            // Dropping the cache entry on the way out matters as much as the return
+            // does: the Prefix pre-sets the backing field from that cache, so a track
+            // that fades back to unclassified would otherwise have last frame's side
+            // injected into it before UpdateFromECS ran - re-classifying it by the back
+            // door, which is the very thing being fixed.
+            if (actualTf != Globals._playerTaskforce && __instance.UnitTaskforce.Value == null)
+            {
+                _ecsTaskforce.Remove(__instance);
+                return;
+            }
 
             // First detection: UpdateFromECS fired the subscription with the wrong
             // taskforce and we have no cached value to suppress it. Correct via
