@@ -1054,6 +1054,11 @@ namespace SeapowerMultiplayer
                     TimeSyncManager.OnProposalResponseReceived(msg.Param);
                     break;
 
+                case GameEventType.TimeVoteMode:
+                    if (!Plugin.Instance.CfgIsHost.Value)
+                        TimeSyncManager.SetHostVoteMode(msg.Param == 1f);
+                    break;
+
                 case GameEventType.UnitSelected:
                     UnitLockManager.OnRemoteSelected((int)msg.Param);
                     break;
