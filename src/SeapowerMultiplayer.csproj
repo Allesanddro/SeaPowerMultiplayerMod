@@ -71,6 +71,12 @@
       <HintPath>$(GameDir)\Sea Power_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- The game's UI framework. Our overlay is a NoesisView on its own camera,
+         so it works in every scene instead of only inside a loaded mission. -->
+    <Reference Include="Noesis.NoesisGUI">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\Noesis.NoesisGUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- LiteNetLib — UDP networking -->
