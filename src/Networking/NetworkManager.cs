@@ -365,6 +365,7 @@ namespace SeapowerMultiplayer
                 HatchStateCapture.Clear();
                 ReplicaRegistry.Clear();
                 Suppression.EnforceDefenseFlag(); // restores client auto-defence
+                Suppression.EnforceInterceptSymmetry(); // restores the difficulty handicap
                 TaskforceAssignmentManager.Reset();
                 ContactSyncManager.Reset();
                 ContactRevealManager.Reset();

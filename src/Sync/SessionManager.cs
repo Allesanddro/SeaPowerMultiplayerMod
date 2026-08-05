@@ -748,6 +748,11 @@ namespace SeapowerMultiplayer
                 ClearDetectionData();
             }
 
+            // The session loads paused, and the plotting refresh that puts own units on
+            // the map is pause-gated - seed it here or the map stays blank until the
+            // host unpauses. After ClearDetectionData, which rewrites the same table.
+            PlotOwnUnitsNow("scene ready");
+
             // Center camera on first player unit (fixes PvP camera starting on wrong side)
             if (!isHost)
             {
@@ -840,6 +845,43 @@ namespace SeapowerMultiplayer
             }
 
             Log.LogInfo($"[Session] PvP: cleared {totalSpotted} spotted objects and {totalContacts} foreign contacts");
+        }
+
+        /// <summary>
+        /// Push every player-taskforce unit's own truth track onto the plotting table.
+        ///
+        /// The tactical map plots Globals._playerTaskforce.PlottingTable.Vehicles
+        /// (SeapowerUI.MapKnownUnits), and a unit only enters that table when its
+        /// self-track is pushed. The routine that does that for a whole side is
+        /// Taskforce.updateTaskforceContacts, whose ONLY caller is
+        /// TaskforceManager.OnUpdate - which opens with
+        /// <c>if (GameTime.IsPaused()) return;</c>. A received session loads paused and
+        /// stays paused until the host unpauses, so the side that arrived through the
+        /// PvP save swap has no own-unit entries and the guest's map is blank until the
+        /// first unpause.
+        ///
+        /// Safe to call while paused: the self-track is built by OwnSideSensor.MakeTruth
+        /// straight off the unit's transform, not from the ECS geo sync that the paused
+        /// update would otherwise have run first. Idempotent - pushing a truth track for
+        /// a unit already in the table updates it in place, which is exactly what the
+        /// unpaused cadence does every DataLinkUpdateRate seconds.
+        ///
+        /// Calling the game's own per-taskforce routine rather than looping
+        /// UpdateOwnPlottingState() by hand: it already skips wakebubbles and chaff and
+        /// follows up with the single PlottingTable.Update the per-unit calls do not do.
+        /// </summary>
+        public static void PlotOwnUnitsNow(string reason)
+        {
+            var tf = Globals._playerTaskforce;
+            if (tf == null || tf.PlottingTable == null)
+            {
+                Log.LogWarning($"[Session] PlotOwnUnitsNow ({reason}): no player taskforce plotting table");
+                return;
+            }
+
+            tf.updateTaskforceContacts();
+            Log.LogInfo($"[Session] Plotted own units ({reason}): {tf.TaskforceObjects.Count} units -> " +
+                        $"{tf.PlottingTable.Vehicles.Count} vehicles on the player plot");
         }
 
         /// <summary>

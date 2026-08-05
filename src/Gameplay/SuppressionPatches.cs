@@ -101,6 +101,82 @@ namespace SeapowerMultiplayer
                 Plugin.Log.LogInfo("[Suppression] Client auto-defence restored");
             }
         }
+
+        private static (float missileBonus, float missileReduction,
+                        float gunsBonus, float gunsReduction,
+                        float ciwsBonus, float ciwsReduction)? _interceptHandicap;
+
+        /// <summary>HOST-side PvP: turn off the difficulty handicap on interception
+        /// rolls, which is keyed on IsPlayerObject and therefore lands entirely on the
+        /// host's side of the table.
+        ///
+        /// Every interception path applies the same pair: a BONUS when the shooter is a
+        /// player object and a REDUCTION when the target is one. On the host in PvP the
+        /// remote player's fleet is neither, so the host collects both halves - their
+        /// shots are boosted AND incoming shots at them are cut, while the guest gets
+        /// neither in either direction. It is invisible to both players, and it is not a
+        /// desync: the host is authoritative, so this is simply the number both machines
+        /// then agree on. OptionsManager.SetDifficulty scales it 0.5 / 0.3 / 0.2 / 0.1 /
+        /// 0 across difficulties 0-4, so at anything but the hardest setting the host is
+        /// playing a materially different game.
+        ///
+        /// Zeroing the six Globals rather than patching the call sites: these are read at
+        /// seven points across Utils, Blastzone (x2), Projectile and WeaponSystemCIWS,
+        /// every one of them mid-method behind a local - so per-site correction means
+        /// four transpilers, while the values themselves are plain statics with a single
+        /// writer. Zero is also the only setting that is symmetric in BOTH directions and
+        /// against third-party AI as well, which granting the remote fleet player status
+        /// would not be.
+        ///
+        /// The trade: a PvP session rolls interception at the difficulty-4 values whatever
+        /// difficulty is selected. That is the handicap for playing against the computer,
+        /// and in PvP there is no computer to be handicapped against.
+        ///
+        /// Re-asserted every frame and restored on teardown, like the defence flag above.
+        /// The capture re-reads whenever anything non-zero is present so that a difficulty
+        /// changed mid-session is what gets handed back, not the value at session start.</summary>
+        internal static void EnforceInterceptSymmetry()
+        {
+            bool hostPvpSession = Plugin.Instance.CfgIsHost.Value
+                && Plugin.Instance.CfgPvP.Value
+                && NetworkManager.Instance.IsHostRunning;
+
+            if (hostPvpSession)
+            {
+                if (Globals._missileInterceptChanceBonus != 0f || Globals._missileInterceptChanceReduction != 0f
+                    || Globals._gunsInterceptChanceBonus != 0f || Globals._gunsInterceptChanceReduction != 0f
+                    || Globals._ciwsInterceptChanceBonus != 0f || Globals._ciwsInterceptChanceReduction != 0f)
+                {
+                    _interceptHandicap = (
+                        Globals._missileInterceptChanceBonus, Globals._missileInterceptChanceReduction,
+                        Globals._gunsInterceptChanceBonus, Globals._gunsInterceptChanceReduction,
+                        Globals._ciwsInterceptChanceBonus, Globals._ciwsInterceptChanceReduction);
+                    Plugin.Log.LogInfo("[Suppression] PvP interception handicap cleared (missile " +
+                        $"+{_interceptHandicap.Value.missileBonus:0.##}/-{_interceptHandicap.Value.missileReduction:0.##}, " +
+                        $"guns +{_interceptHandicap.Value.gunsBonus:0.##}/-{_interceptHandicap.Value.gunsReduction:0.##}, " +
+                        $"CIWS +{_interceptHandicap.Value.ciwsBonus:0.##}/-{_interceptHandicap.Value.ciwsReduction:0.##})");
+                }
+
+                Globals._missileInterceptChanceBonus = 0f;
+                Globals._missileInterceptChanceReduction = 0f;
+                Globals._gunsInterceptChanceBonus = 0f;
+                Globals._gunsInterceptChanceReduction = 0f;
+                Globals._ciwsInterceptChanceBonus = 0f;
+                Globals._ciwsInterceptChanceReduction = 0f;
+            }
+            else if (_interceptHandicap.HasValue)
+            {
+                var saved = _interceptHandicap.Value;
+                Globals._missileInterceptChanceBonus = saved.missileBonus;
+                Globals._missileInterceptChanceReduction = saved.missileReduction;
+                Globals._gunsInterceptChanceBonus = saved.gunsBonus;
+                Globals._gunsInterceptChanceReduction = saved.gunsReduction;
+                Globals._ciwsInterceptChanceBonus = saved.ciwsBonus;
+                Globals._ciwsInterceptChanceReduction = saved.ciwsReduction;
+                _interceptHandicap = null;
+                Plugin.Log.LogInfo("[Suppression] PvP interception handicap restored");
+            }
+        }
     }
 
     /// <summary>Client carriers are puppets - the host owns all flight-deck ops.
@@ -359,7 +435,7 @@ namespace SeapowerMultiplayer
         }
     }
 
-    /// <summary>HOST-side PvP: keep the remote player's submarines out of the crew's
+    /// <summary>HOST-side PvP: keep the remote player's units out of the crew's
     /// automatic TORPEDO EVASION.
     ///
     /// This is not a restriction, it is parity. The transition is registered as
@@ -376,6 +452,14 @@ namespace SeapowerMultiplayer
     /// TorpedoEvasion, with "Evading Torpedo" replicated to its owner through
     /// UnitStatusManager while their own controls did nothing.
     ///
+    /// SURFACE SHIPS TOO. There are two unrelated classes with this name -
+    /// SubmarineStates.TorpedoEvasion (field _submarine) and VesselStates.TorpedoEvasion
+    /// (field _vessel) - and Vessel.cs:154 registers the vessel one through this same
+    /// addAnyTransition path under an identical (DM._subAIAppliesToPlayer ||
+    /// !IsPlayerObject) gate. Matching only the submarine type left the remote player's
+    /// entire surface fleet still evading on its own. Both are handled here; a missing
+    /// field on one does not disable the other.
+    ///
     /// Wrapping the PREDICATE rather than blocking the state: a state that is entered
     /// and then refused has no way back out (TorpedoEvasion.IsFinished is set by its own
     /// update, which we would also have to skip), so the boat would strand in it. The
@@ -388,21 +472,43 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(StateMachine), nameof(StateMachine.addAnyTransition))]
     public static class Patch_V2_RemoteTf_TorpedoEvasion_Suppress
     {
-        private static readonly AccessTools.FieldRef<TorpedoEvasion, Submarine>? _subRef =
-            AccessTools.FieldRefAccess<TorpedoEvasion, Submarine>("_submarine");
+        private static readonly AccessTools.FieldRef<SubmarineStates.TorpedoEvasion, Submarine>? _subRef =
+            AccessTools.FieldRefAccess<SubmarineStates.TorpedoEvasion, Submarine>("_submarine");
+
+        private static readonly AccessTools.FieldRef<VesselStates.TorpedoEvasion, Vessel>? _vesselRef =
+            AccessTools.FieldRefAccess<VesselStates.TorpedoEvasion, Vessel>("_vessel");
 
         static void Prefix(IState state, ref System.Func<bool> predicate)
         {
-            if (!(state is TorpedoEvasion evasion) || predicate == null) return;
-            if (_subRef == null)
+            if (predicate == null) return;
+
+            // Resolved per registration, evaluated per tick - the unit is read inside
+            // the wrapped predicate so it follows the session in and out.
+            System.Func<ObjectBase?> owner;
+            if (state is SubmarineStates.TorpedoEvasion sub)
             {
-                Plugin.Log.LogWarning("[Suppression] TorpedoEvasion._submarine not found - the " +
-                                      "remote player's submarines will keep evading torpedoes on their own");
-                return;
+                if (_subRef == null)
+                {
+                    Plugin.Log.LogWarning("[Suppression] SubmarineStates.TorpedoEvasion._submarine not found - the " +
+                                          "remote player's submarines will keep evading torpedoes on their own");
+                    return;
+                }
+                owner = () => _subRef(sub);
             }
+            else if (state is VesselStates.TorpedoEvasion vessel)
+            {
+                if (_vesselRef == null)
+                {
+                    Plugin.Log.LogWarning("[Suppression] VesselStates.TorpedoEvasion._vessel not found - the " +
+                                          "remote player's surface ships will keep evading torpedoes on their own");
+                    return;
+                }
+                owner = () => _vesselRef(vessel);
+            }
+            else return;
 
             var inner = predicate;
-            predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(_subRef(evasion));
+            predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(owner());
         }
     }
 
@@ -528,6 +634,67 @@ namespace SeapowerMultiplayer
             if (__result._weaponStatus == ObjectBase.WeaponStatus.Tight) return;
 
             __result._weaponStatus = ObjectBase.WeaponStatus.Tight;
+        }
+    }
+
+    /// <summary>The same stamp again, on going Winchester. AircraftStates.Winchester
+    /// .onEnter splits on ownership twice:
+    ///
+    ///   if (IsPlayerObject)  _checkForWinchester = false;
+    ///   if (!IsPlayerObject) _weaponStatus = Hold;
+    ///   else if (_weaponStatus == Free) _weaponStatus = Tight;
+    ///
+    /// so a player's own out-of-ordnance aircraft drops Free to Tight and stops
+    /// re-testing, while the host's copy of the remote player's aircraft is forced to
+    /// HOLD - which will not fire even in self-defence - and keeps re-entering. Like
+    /// the two stamps above it writes the field directly rather than going through
+    /// SetWeaponStatus, so it never syncs and the two machines silently disagree about
+    /// the guest's weapon status.
+    ///
+    /// Unlike those two this is not a fixed value: the player-side result depends on
+    /// the status the aircraft had on entry, which onEnter has already overwritten by
+    /// the time a postfix runs. Hence the prefix capture.
+    ///
+    /// The transition GATE (Aircraft.CheckForWinchester's
+    /// <c>if (IsPlayerObject &amp;&amp; !Globals._playerPlanesWinchester) return false;</c>,
+    /// and the equivalent "stays with AAM/guns" tests) is left alone - those read local
+    /// options whose default already has a player's own aircraft behaving this way, and
+    /// the guest's setting is not knowable here.</summary>
+    [HarmonyPatch(typeof(AircraftStates.Winchester), nameof(AircraftStates.Winchester.onEnter))]
+    public static class Patch_V2_RemoteTf_WinchesterStamp
+    {
+        static void Prefix(AircraftStates.Winchester __instance, out ObjectBase.WeaponStatus __state)
+        {
+            __state = __instance._aircraft?._weaponStatus ?? ObjectBase.WeaponStatus.Hold;
+        }
+
+        static void Postfix(AircraftStates.Winchester __instance, ObjectBase.WeaponStatus __state)
+        {
+            var aircraft = __instance._aircraft;
+            if (aircraft == null) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(aircraft)) return;
+
+            aircraft._checkForWinchester = false;
+            aircraft._weaponStatus = __state == ObjectBase.WeaponStatus.Free
+                ? ObjectBase.WeaponStatus.Tight
+                : __state;
+        }
+    }
+
+    /// <summary>The helicopter half of the same state. HelicopterStates.Winchester
+    /// .onEnter has only the _checkForWinchester branch - no weapon-status stamp - so
+    /// this just hands the remote player's helicopters the same "stop re-testing" the
+    /// host's own get.</summary>
+    [HarmonyPatch(typeof(HelicopterStates.Winchester), nameof(HelicopterStates.Winchester.onEnter))]
+    public static class Patch_V2_RemoteTf_WinchesterStamp_Helo
+    {
+        static void Postfix(HelicopterStates.Winchester __instance)
+        {
+            var helicopter = __instance._helicopter;
+            if (helicopter == null) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(helicopter)) return;
+
+            helicopter._checkForWinchester = false;
         }
     }
 
