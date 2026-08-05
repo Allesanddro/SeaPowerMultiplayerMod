@@ -24,6 +24,20 @@ namespace SeapowerMultiplayer
         /// <summary>True while the client is loading a scene. Suppresses patches that crash during load.</summary>
         public static bool SceneLoading { get; private set; }
 
+        /// <summary>
+        /// True when a mission scene is loaded and has finished loading.
+        ///
+        /// Everything a capture sends comes from a live scene: SaveGame writes the
+        /// current mission, UnitRegistry reads it, Environment.Seconds is its clock.
+        /// In the main menu none of that exists, so the host must not start a sync
+        /// from there. Detected directly rather than tracked as a flag, for the same
+        /// reason DoUnloadAndLoad does it - a mission the player loaded on their own
+        /// never went through any of our code.
+        /// </summary>
+        public static bool MissionIsLive
+            => Singleton<SceneCreator>.InstanceExists(false)
+               && Singleton<SceneCreator>.Instance.IsLoadingDone;
+
         private static int _pendingRngSeed;
         private static float _pendingGameSeconds;
 
@@ -123,6 +137,25 @@ namespace SeapowerMultiplayer
 
         public static void CaptureAndSend()
         {
+            // Checked before anything else, and before any state is touched. The
+            // old path went ahead from the main menu: it paused, set
+            // WaitingForClient, saved a session with no mission in it, and shipped
+            // that to the client - leaving the host on "Waiting for client to
+            // load..." and the client waiting for a mission that never comes.
+            // Neither side had any way back except a disconnect.
+            if (!MissionIsLive)
+            {
+                Log.LogWarning("[Session] CaptureAndSend skipped — no mission loaded");
+                SimSyncManager.ReportIssue(
+                    "No mission loaded — nothing to send.",
+                    "Start or load a mission first, then press Send State & Wait.",
+                    // A warning, not an error: the player has done nothing wrong,
+                    // they are just early. Errors here would also colour the banner
+                    // red and count against the diagnostics error rate.
+                    warning: true);
+                return;
+            }
+
             if (_pendingSavePath != null)
             {
                 Log.LogWarning("[Session] CaptureAndSend skipped — a save is still being written");
@@ -542,10 +575,7 @@ namespace SeapowerMultiplayer
             // branch with a scene live destroys TerrainManager mid-mission -
             // AutogenManager then NREs every LateUpdate on the blank
             // auto-created replacement (_biomesName is null until init()).
-            bool sceneLive = Singleton<SceneCreator>.InstanceExists(false)
-                          && Singleton<SceneCreator>.Instance.IsLoadingDone;
-
-            if (sceneLive)
+            if (MissionIsLive)
             {
                 // Already in-game: use the game's proper unload-then-load path.
                 // DoUnload (99999) tears down terrain/textures, unloads scene 2, and
