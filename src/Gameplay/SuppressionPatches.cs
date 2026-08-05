@@ -512,6 +512,123 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>HOST-side PvP: the remote player's SUBMARINE state machine.
+    ///
+    /// This is the boat piloting itself - sprinting, drifting, clearing baffles, going
+    /// to periscope depth, snorkelling - and none of it goes through AI.OnFixedUpdate,
+    /// so none of the AI suppression above ever touched it. Submarine.initStates
+    /// registers the transitions directly on the StateMachine (Submarine.cs:197-271),
+    /// and each one is gated on <c>(DM._subAIAppliesToPlayer || !IsPlayerObject)</c>
+    /// with _subAIAppliesToPlayer off by default - so the game NEVER runs these for a
+    /// player's own boat. On the host the remote player's submarine is not a player
+    /// object, so all of it ran: their boat picked its own speed, depth and heading
+    /// and raised masts, while its owner's controls fought it over the wire.
+    ///
+    /// Skipping them IS the player-boat behaviour, not a restriction on top of it.
+    ///
+    /// Two directions are needed, because the game expresses "this is a player's boat"
+    /// twice with opposite polarity:
+    ///
+    ///  - ENTRY into an AI state is gated on !IsPlayerObject, so it must be BLOCKED.
+    ///    SelectMovementType is the only door into the whole Sprint / Drift /
+    ///    ClearBaffles / GoingToPeriscopeDepth cluster (:210-219, every internal
+    ///    transition originates there), so gating that one closes all five.
+    ///
+    ///  - The ESCAPES from that cluster back to Default (:220-224) are gated on
+    ///    IsPlayerObject being TRUE, so they never fire for the remote boat. A boat
+    ///    already inside the cluster when hosting starts - the AI ran freely before
+    ///    the session - would strand there once re-entry is blocked. Those are FORCED
+    ///    instead, which is exactly the transition a player's own boat gets.
+    ///
+    /// Left alone deliberately: Loitering, PlayerOverride, PerformingAirOps,
+    /// AvoidingCollision, Aligning and EmergencySurface are not gated on ownership -
+    /// a player's own boat uses them too. CounterLaunch and TorpedoEvasion are
+    /// auto-defence, handled by their own patch above.</summary>
+    public static class RemoteTfSubStates
+    {
+        private static readonly System.Collections.Generic.HashSet<System.Type> AiEntry = new()
+        {
+            typeof(SubmarineStates.SelectMovementType),   // door to Sprint/Drift/ClearBaffles/PeriscopeDepth
+            typeof(SubmarineStates.BuildContactSolution),
+            typeof(SubmarineStates.IdentifyContact),
+            typeof(SubmarineStates.ClassifyContact),
+            typeof(SubmarineStates.Snorkelling),
+            typeof(SubmarineStates.ClearingDatum),
+            typeof(SubmarineStates.GuidingMissiles),
+            typeof(SubmarineStates.OpeningToFiringRange),
+            typeof(SubmarineStates.ReacquireContact),
+        };
+
+        private static readonly System.Collections.Generic.HashSet<System.Type> MovementCluster = new()
+        {
+            typeof(SubmarineStates.Sprint),
+            typeof(SubmarineStates.Drift),
+            typeof(SubmarineStates.ClearBafflesTurningBack),
+            typeof(SubmarineStates.ClearBafflesListening),
+            typeof(SubmarineStates.GoingToPeriscopeDepth),
+        };
+
+        /// <summary>Every one of these states holds its own <c>private Submarine
+        /// _submarine</c>, assigned in the constructor before initStates registers any
+        /// transition - so it is resolved ONCE here and captured by the predicate,
+        /// keeping the per-tick path free of reflection.</summary>
+        private static Submarine? OwnerOf(IState? state)
+        {
+            if (state == null) return null;
+            var field = AccessTools.Field(state.GetType(), "_submarine");
+            if (field == null)
+            {
+                Plugin.Log.LogWarning($"[Suppression] {state.GetType().Name}._submarine not found - " +
+                    "the remote player's submarines will keep this piece of self-piloting AI");
+                return null;
+            }
+            return field.GetValue(state) as Submarine;
+        }
+
+        internal static void GateEntry(IState? to, ref System.Func<bool> predicate)
+        {
+            if (predicate == null || to == null || !AiEntry.Contains(to.GetType())) return;
+            var sub = OwnerOf(to);
+            if (sub == null) return;
+
+            var inner = predicate;
+            predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(sub);
+        }
+
+        internal static void ForceEscape(IState? from, IState? to, ref System.Func<bool> predicate)
+        {
+            if (predicate == null || from == null || !(to is SubmarineStates.Default)) return;
+            if (!MovementCluster.Contains(from.GetType())) return;
+            var sub = OwnerOf(from);
+            if (sub == null) return;
+
+            var inner = predicate;
+            predicate = () => inner() || Suppression.HostSuppressesRemoteTfAi(sub);
+        }
+    }
+
+    /// <summary>The AtAny half (Submarine.cs:254-268). Shares addAnyTransition with the
+    /// torpedo-evasion patch above; Harmony runs both prefixes and each wraps the
+    /// predicate it owns.</summary>
+    [HarmonyPatch(typeof(StateMachine), nameof(StateMachine.addAnyTransition))]
+    public static class Patch_V2_RemoteTf_SubStates_Any
+    {
+        static void Prefix(IState state, ref System.Func<bool> predicate)
+            => RemoteTfSubStates.GateEntry(state, ref predicate);
+    }
+
+    /// <summary>The directed half: the door into the movement cluster (:210, plus the
+    /// :214/:217/:219 loop-backs) and the escapes out of it (:220-224).</summary>
+    [HarmonyPatch(typeof(StateMachine), nameof(StateMachine.addTransition))]
+    public static class Patch_V2_RemoteTf_SubStates_Directed
+    {
+        static void Prefix(IState from, IState to, ref System.Func<bool> predicate)
+        {
+            RemoteTfSubStates.GateEntry(to, ref predicate);
+            RemoteTfSubStates.ForceEscape(from, to, ref predicate);
+        }
+    }
+
     /// <summary>Mission-level AI (behaviour-tree pump: scripted spawns, third-party
     /// taskforce orders, airstrike scheduling) - host-only.</summary>
     [HarmonyPatch(typeof(AIController), nameof(AIController.OnUpdate))]
@@ -789,6 +906,95 @@ namespace SeapowerMultiplayer
     public static class Patch_V2_Blastzone_Suppress
     {
         static bool Prefix() => !Suppression.ClientActive;
+    }
+
+    /// <summary>CLIENT: the client never decides that a ship starts sinking.
+    ///
+    /// Blastzone suppression stops the client APPLYING damage, but Compartments
+    /// .OnFixedUpdate was never suppressed, and it is not a renderer - it is a
+    /// simulation that acts on hard thresholds every physics tick (:1290-1355):
+    ///
+    ///   if (FloodingPercentage > 40f) Sink(SinkFocus.All);       // 50f for submarines
+    ///   if (num &gt; 70f || num &lt; -70f) { _capSized = true; Sink(...); }
+    ///
+    /// DamageState corrections arrive every CfgDamageSyncInterval (2 s default), so
+    /// between them the client free-runs ~100 ticks of its own flooding spread and
+    /// damage-control repair and can cross those thresholds on its own schedule.
+    ///
+    /// And it is a ONE-WAY door. Sink() opens with `if (_isSinking) return;` and
+    /// nothing clears _isSinking outside DebugRessurect(), while DamageStateSerializer
+    /// .Apply can only ever START a sink (msg.IsSinking &amp;&amp; !_isSinking) - it has no
+    /// way to cancel one. So a client that tripped 40% early sinks permanently while
+    /// the host is still afloat and repairing, and the two never reconverge. That is
+    /// the "sinks straight away on one side, afloat for ages on the other" divergence.
+    ///
+    /// The host's decision reaches us three ways - EntityState.FlagSinking in the
+    /// 10 Hz stream, DamageState.IsSinking, and DestroyEvent's ModeStartSinking - and
+    /// all of them apply under Authority, which is what this lets through.</summary>
+    [HarmonyPatch(typeof(Compartments), nameof(Compartments.Sink))]
+    public static class Patch_V2_Compartments_Sink
+    {
+        static bool Prefix(Compartments __instance, out bool __state)
+        {
+            __state = __instance._isSinking;
+            if (!Suppression.ClientActive || Authority.IsAllowed) return true;
+
+            // Refused. The client's OnFixedUpdate retries every physics tick for as
+            // long as it stays over the threshold (_isSinking never latches), so log
+            // once per unit - this line paired against the absence of an "applied host
+            // sink" line is what identifies a sink signal that never arrived.
+            LogRefusalOnce(__instance);
+            return false;
+        }
+
+        /// <summary>HOST: push the sink out immediately instead of waiting up to
+        /// CfgDamageSyncInterval. FlagSinking rides the 10 Hz stream and would start
+        /// the client's descent within ~100 ms, but _sinkTime only travels on
+        /// DamageState - so without this the client descends off its own clock until
+        /// the next correction and then visibly jumps onto the host's curve.</summary>
+        static void Postfix(Compartments __instance, bool __state)
+        {
+            if (__state) return;                  // already sinking - Sink() no-opped
+            if (!__instance._isSinking) return;   // prefix refused it (client)
+
+            var unit = __instance._baseObject;
+            Plugin.Log.LogInfo($"[Damage] Sink START {Describe(__instance)} " +
+                               $"destroyed={unit?.IsDestroyed} " +
+                               $"{(Plugin.Instance.CfgIsHost.Value ? "(host decision)" : "(applied from host)")}");
+            StateBroadcaster.SendDamageStateNow(unit);
+        }
+
+        private static readonly System.Collections.Generic.HashSet<int> _refusalLogged = new();
+
+        private static void LogRefusalOnce(Compartments comps)
+        {
+            int id = comps._baseObject?.UniqueID ?? -1;
+            if (!_refusalLogged.Add(id)) return;
+            Plugin.Log.LogInfo($"[Damage] Sink REFUSED locally {Describe(comps)} - " +
+                               "waiting for the host's FlagSinking/DamageState");
+        }
+
+        internal static string Describe(Compartments comps)
+        {
+            var unit = comps._baseObject;
+            return $"{unit?.UniqueID}-{unit?.name} flooding={comps.FloodingPercentage:0.#}% " +
+                   $"integrity={comps.IntegrityPercentage:0.#}%";
+        }
+
+        /// <summary>Cleared on session teardown so a second session logs afresh.</summary>
+        public static void ClearLogCache() => _refusalLogged.Clear();
+    }
+
+    /// <summary>CLIENT: same reasoning for the other terminal decision in
+    /// Compartments.OnFixedUpdate - <c>TotalIntegrity / _maxTotalIntegrity &lt; 0.1f</c>
+    /// and the _delayedSinkTime expiry both call DestroyByExplosion() (:1295-1304),
+    /// so the client could kill a ship the host still has alive. Destruction arrives
+    /// as DestroyEvent / FlagDestroyed and applies through
+    /// CombatEventHandler.DestroyFromNetwork, under Authority.</summary>
+    [HarmonyPatch(typeof(Compartments), nameof(Compartments.DestroyByExplosion))]
+    public static class Patch_V2_Compartments_DestroyByExplosion_Suppress
+    {
+        static bool Prefix() => !Suppression.ClientActive || Authority.IsAllowed;
     }
 
     /// <summary>CIWS never acquires or rolls intercepts on the client.</summary>
