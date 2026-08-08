@@ -610,10 +610,79 @@ namespace SeapowerMultiplayer
                     obj.destroyObject(false, false, TacView.TCEvent.Destroyed);
                 AircraftReplicaDriver.Forget(msg.EntityId);
             }
+            EvictFromFormations(obj);
             WeaponReplicaDriver.Forget(msg.EntityId);
             DeckPuppetDriver.Forget(msg.EntityId);
             ReplicaRegistry.Unregister(msg.EntityId);
             Tombstone(msg.EntityId);
+        }
+
+        /// <summary>Make sure no local formation is left seating a unit this despawn
+        /// retired. Only the two teardown branches above run destroyObject, whose first
+        /// act is the formation detach - every other path (a Vessel/Submarine/LandUnit
+        /// despawn, an unlaunched pooled weapon, or a lookup that missed entirely) fell
+        /// straight through to the bookkeeping and left the station seated.
+        ///
+        /// A stranded station is not inert. UnitFormation.get_InFormationSummary is a
+        /// Noesis binding, and it filters on <c>UnitObject != null</c> - which is Unity's
+        /// operator, so it screens out a DESTROYED object but not a live pooled one that
+        /// has been recycled out from under the station. It then dereferences
+        /// <c>UnitObject._obp._typeAbbr</c>, and a pooled object carries no _obp. That
+        /// throws on EVERY UI frame from then on, which is the engine's "repeated
+        /// exceptions - degraded performance" warning after aircraft recover to a deck.
+        ///
+        /// Two passes because the id is not always enough. When the despawn resolved to
+        /// its own object, DetachUnit is the complete operation and it runs. When it
+        /// resolved to nothing (tombstoned, or an id that landed on the wrong object)
+        /// there is no handle to detach, so the corpse has to be recognised by the same
+        /// thing that trips the binding - a seated unit with no _obp. That scan is
+        /// bounded by formations x stations and only runs on a despawn, not per frame.
+        ///
+        /// The corpse is evicted by emptying its seat rather than through DetachUnit,
+        /// which would dereference the dead object again on the way out
+        /// (CleanUpStation reads obj._taskforce before it clears the seat, and calls
+        /// RemoveWaypoints after) - trading a repeating exception for a one-shot inside
+        /// the message drain is not a fix. An EMPTY station is a state the engine
+        /// already handles everywhere: AddUnit reuses it, InFormationSummary filters it,
+        /// OnUpdate's station-keeping skips it, and UnitOnStationNotValid reports it, so
+        /// a corpse that was the LEADER is handed over by the formation's own next
+        /// update rather than needing anything here.</summary>
+        private static void EvictFromFormations(ObjectBase? obj)
+        {
+            if (obj != null)
+            {
+                obj.Formation?.DetachUnit(obj);
+                return;
+            }
+
+            ScanForCorpses(Globals._playerTaskforce);
+            ScanForCorpses(Globals._enemyTaskforce);
+            ScanForCorpses(Globals._neutralTaskforce);
+        }
+
+        private static void ScanForCorpses(Taskforce? tf)
+        {
+            var formations = tf?.Formations;
+            if (formations == null) return;
+
+            for (int f = formations.Count - 1; f >= 0; f--)
+            {
+                var stations = formations[f]?.Stations;
+                if (stations == null) continue;
+
+                for (int s = stations.Count - 1; s >= 0; s--)
+                {
+                    var station = stations[s];
+                    // Unity's operator, so a DESTROYED object reads as null here and is
+                    // already screened out by the binding - the one that gets through is
+                    // a live pooled object recycled out from under the station.
+                    if (station?.UnitObject == null || station.UnitObject._obp != null) continue;
+
+                    Plugin.Log.LogWarning($"[V2] Formation '{formations[f].Name}' was seating a " +
+                        "recycled object with no parameters - emptying the station.");
+                    station.UnitObject = null;
+                }
+            }
         }
 
         public static void HandleDestroyEvent(DestroyEventMessage msg)
