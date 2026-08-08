@@ -273,7 +273,6 @@ namespace SeapowerMultiplayer
 
         internal static void RunAlignmentFromUnitStates(List<UnitState> units)
         {
-            int savedUid = Singleton<SceneCreator>.Instance._UID;
             var reassignments = new List<(ObjectBase obj, int hostId)>();
 
             // PvP: the state update contains the remote player's units. After PvP
@@ -317,7 +316,9 @@ namespace SeapowerMultiplayer
             foreach (var (obj, hostId) in reassignments)
                 obj.SetUniqueId(hostId);
 
-            Singleton<SceneCreator>.Instance._UID = savedUid;
+            // _UID is deliberately NOT put back the way it was found. Restoring it here
+            // undid SetUniqueId's own collision defence - see SpawnReplicator.AssignHostId
+            // for the same removal and why the counter no longer needs protecting.
             // SetUniqueId bypasses the Awake/OnDestroy hooks, so the id index is now
             // holding the pre-remap ids.
             UnitRegistry.Reindex();

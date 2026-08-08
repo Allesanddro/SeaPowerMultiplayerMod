@@ -54,14 +54,21 @@ namespace SeapowerMultiplayer
             _spawnFailures.Clear();
         }
 
-        /// <summary>Assign the host's id without polluting the client's UID counter
-        /// (SetUniqueId bumps it when the assigned id is higher).</summary>
-        private static void AssignHostId(ObjectBase obj, int hostId)
-        {
-            int savedUid = Singleton<SceneCreator>.Instance._UID;
-            obj.SetUniqueId(hostId);
-            Singleton<SceneCreator>.Instance._UID = savedUid;
-        }
+        /// <summary>Assign the host's id.
+        ///
+        /// This used to save and restore SceneCreator._UID around the call, to keep the
+        /// client's counter from being dragged up by a host id. That kept the counter
+        /// monotonic but disabled the game's ONLY defence against exactly the collision
+        /// it was worried about: SetUniqueId advances _UID past any id it adopts
+        /// (ObjectBase.cs:1638-1645), which is what stops a later local allocation
+        /// landing on an id already in use. Putting it back meant the guest went on
+        /// handing its own chaff and decoys numbers the host was replicating into.
+        ///
+        /// The restore is gone and the defence is left alone. It costs nothing in the
+        /// normal case - GuestIdFloor holds the counter above ClientUidBase, so an
+        /// incoming host id is far below it and SetUniqueId's comparison never fires -
+        /// and it is the backstop for any path where the floor is not armed.</summary>
+        private static void AssignHostId(ObjectBase obj, int hostId) => obj.SetUniqueId(hostId);
 
         // ── Spawn ─────────────────────────────────────────────────────────────
 

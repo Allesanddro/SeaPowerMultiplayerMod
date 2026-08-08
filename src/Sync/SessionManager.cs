@@ -725,16 +725,13 @@ namespace SeapowerMultiplayer
                 // them LIVE - demote them all to inert replicas (host streams them)
                 SpawnReplicator.DemoteLoadedWeapons();
 
-                // v2: move the client's UID counter into its private band so any
-                // client-local spawns never collide with host-assigned ids
-                var welcome = NetworkManager.Instance.SessionParams;
-                if (welcome != null && welcome.ClientUidBase > 0
-                    && SeaPower.Singleton<SeaPower.SceneCreator>.InstanceExists(false)
-                    && SeaPower.Singleton<SeaPower.SceneCreator>.Instance._UID < welcome.ClientUidBase)
-                {
-                    SeaPower.Singleton<SeaPower.SceneCreator>.Instance._UID = welcome.ClientUidBase;
-                    Plugin.Log.LogInfo($"[Session] Client UID counter rebased to {welcome.ClientUidBase}");
-                }
+                // The one-shot UID rebase that used to sit here is gone. It ran after the
+                // load had settled, but the guest allocates ids all the way THROUGH a
+                // load - the weapon pool alone takes hundreds - so the objects that
+                // actually collided were already numbered by the time it fired, and
+                // SceneCreator reassigns _UID from the save partway through a load
+                // regardless. GuestIdFloor holds the same floor on the allocator itself,
+                // armed at Welcome and re-checked per call.
             }
 
             // PvP: flush pre-existing engage tasks on the remote player's units.
