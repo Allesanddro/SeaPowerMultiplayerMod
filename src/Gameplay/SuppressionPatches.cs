@@ -1192,7 +1192,18 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>Canary: any weapon launch on the client outside network authority
-    /// is a suppression leak - block it, kill the object, count it loudly.</summary>
+    /// is a suppression leak - block it, kill the object, count it loudly.
+    ///
+    /// EXCEPT during a session load, which is not a leak and must not be reported as
+    /// one. Restoring a received save runs the game's own
+    /// SceneCreator.LaunchWeapons(), which re-launches everything that was in flight
+    /// when the host saved (SceneCreator.cs:5071-5097, Container_Launch per weapon).
+    /// Blocking is still right - the host simulates those rounds and streams them
+    /// back as replicas, so a local copy would be a duplicate - but it is an expected
+    /// consequence of the load, not a hole in the kill-switches, and an error-level
+    /// "report this" for it costs somebody an investigation. Ask
+    /// SessionManager.SceneLoading, the same exemption Patch_V2_CreateHelicopter_Guard
+    /// already carries.</summary>
     [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.CommonLaunchSettings))]
     public static class Patch_V2_LaunchCanary
     {
@@ -1202,10 +1213,48 @@ namespace SeapowerMultiplayer
             if (Authority.IsAllowed) return true;
             if (CaptureState.WeaponClassOf(__instance) == null) return true; // chaff/noisemaker etc. stay local for now
 
+            // Deactivating is not enough on its own. The object reached Awake, so it is
+            // in UnitRegistry under the id it carried in the save - which is the HOST's
+            // id for that same round, the one the host streams a replica under. FindById
+            // asks UnitRegistry BEFORE ReplicaRegistry (StateSerializer.cs:152-157), so
+            // the corpse would answer for every later state sample, impact and despawn
+            // aimed at the live replica: a missile frozen on the client and a despawn
+            // landing on the wrong object.
+            //
+            // And the id has to go, not just the registration. FindById's last resort is
+            // ScanForId → SceneCreator.FindGlobalObjectById, which is
+            // Resources.FindObjectsOfTypeAll and therefore finds INACTIVE objects too -
+            // so a merely deactivated corpse still answers. That matters most for the
+            // census: HandleCensus skips requesting a spawn replay for any id FindById
+            // can resolve, so the corpse would have told the client it already had the
+            // round and suppressed the very replay WeaponLedgerRebuild exists to send.
+            //
+            // SetUniqueId(0) is the game's own "no id" sentinel and is safe here: it only
+            // advances SceneCreator._UID when the new id is HIGHER (ObjectBase.cs:1641),
+            // so it cannot disturb allocation, and every lookup path already treats 0 as
+            // unresolvable.
+            UnitRegistry.Unregister(__instance);
+            __instance.SetUniqueId(0);
+            __instance.gameObject.SetActive(false);
+
+            if (SessionManager.SceneLoading)
+            {
+                // Refused, not lost. WeaponLedgerRebuild re-ledgers this round on the
+                // host at the session boundary, so the next census advertises it and
+                // this client asks for a spawn replay - which is exactly why the id had
+                // to be surrendered above: FindById would otherwise have answered with
+                // this corpse and suppressed the request. What arrives instead is a
+                // host-driven replica, and two copies of one round is the only outcome
+                // worse than a late one.
+                Telemetry.Count("v2.loadWeaponDeferred");
+                Plugin.Log.LogInfo($"[Session] In-flight weapon from the received save not " +
+                    $"re-launched locally: {__instance.name} — arrives as a replica via the census.");
+                return false;
+            }
+
             Telemetry.Count("v2.canaryBlockedLaunch");
             Plugin.Log.LogError($"[Canary] Blocked un-authorized client weapon launch: " +
                 $"{__instance.name} ({__instance._ap?._ammunitionFileName}) — suppression leak, report this");
-            __instance.gameObject.SetActive(false);
             return false;
         }
     }

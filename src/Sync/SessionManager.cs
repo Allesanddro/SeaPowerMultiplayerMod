@@ -212,7 +212,13 @@ namespace SeapowerMultiplayer
             CaptureState.Clear();
             HatchStateCapture.Clear();
             Patch_V2_MissionEnd_Capture.Reset();
-            EntityCensusManager.Reset();            
+            EntityCensusManager.Reset();
+
+            // Immediately after the clear, and only ever after it: put back the ledger
+            // entries for rounds that are in the air at this instant, so a mid-battle
+            // resync does not lose every missile and torpedo already flying. See
+            // WeaponLedgerRebuild for why the clear itself has to stay.
+            WeaponLedgerRebuild.Run();            
             FlightDeckStreamer.Reset();
             FlightDeckStateApplier.Reset();
 

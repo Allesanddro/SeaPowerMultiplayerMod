@@ -94,37 +94,125 @@ namespace SeapowerMultiplayer
             if (!CaptureState.HostCaptureActive) return;
             if (__instance._ap == null) return;
 
-            var weaponClass = CaptureState.WeaponClassOf(__instance);
-            bool isDecoy = __instance is ChaffCloud || __instance is Noisemaker;
-            if (weaponClass == null && !isDecoy) return; // gun shells etc. - cosmetic events handle those
+            var msg = Build(__instance, targetObject, isSubmunition);
+            if (msg == null) return; // gun shells etc. - cosmetic events handle those
+
+            NetworkManager.Instance.BroadcastToClients(msg);
+            CaptureState.RecordSpawn(msg);
+            Telemetry.Count(msg.Kind == SpawnKind.Decoy ? "v2.capturedDecoy" : "v2.capturedSpawn");
+        }
+
+        /// <summary>The spawn message for a weapon, from the weapon's CURRENT state.
+        /// Shared with <see cref="WeaponLedgerRebuild"/> so a re-ledgered round and a
+        /// freshly launched one cannot describe themselves differently. Returns null
+        /// for classes that are not replicated.</summary>
+        internal static EntitySpawnMessage? Build(WeaponBase wb, ObjectBase? targetObject,
+                                                  bool isSubmunition)
+        {
+            if (wb._ap == null) return null;
+
+            var weaponClass = CaptureState.WeaponClassOf(wb);
+            bool isDecoy = wb is ChaffCloud || wb is Noisemaker;
+            if (weaponClass == null && !isDecoy) return null;
 
             var geo = Utils.worldPositionFromUnityToLongLat(
-                __instance.transform.position, Globals._currentCenterTile);
-            var aim = __instance.AimPointGeoPosition;
-            var shooter = StateSerializer.GetLaunchPlatform(__instance);
+                wb.transform.position, Globals._currentCenterTile);
+            var aim = wb.AimPointGeoPosition;
+            var shooter = StateSerializer.GetLaunchPlatform(wb);
 
-            var msg = new EntitySpawnMessage
+            return new EntitySpawnMessage
             {
                 Kind        = isDecoy ? SpawnKind.Decoy : SpawnKind.Weapon,
-                EntityId    = __instance.UniqueID,
+                EntityId    = wb.UniqueID,
                 WeaponClass = weaponClass ?? 0,
-                AmmoName    = __instance._ap._ammunitionFileName,
+                AmmoName    = wb._ap._ammunitionFileName,
                 ShooterId   = shooter != null ? shooter.UniqueID : 0,
                 TargetId    = targetObject != null ? targetObject.UniqueID : 0,
                 LonDeg      = geo._longitude,
                 LatDeg      = geo._latitude,
                 HeightM     = (float)geo._height,
-                HeadingQ    = GeoCodec.PackHeading(__instance.transform.eulerAngles.y),
-                PitchQ      = GeoCodec.PackAngleCdeg(__instance.transform.eulerAngles.x),
-                SpeedQ      = GeoCodec.PackSpeedKts(__instance._velocityInKnots),
+                HeadingQ    = GeoCodec.PackHeading(wb.transform.eulerAngles.y),
+                PitchQ      = GeoCodec.PackAngleCdeg(wb.transform.eulerAngles.x),
+                SpeedQ      = GeoCodec.PackSpeedKts(wb._velocityInKnots),
                 AimLonDeg   = aim._longitude,
                 AimLatDeg   = aim._latitude,
                 AimHeightM  = (float)aim._height,
                 Flags       = isSubmunition ? EntitySpawnMessage.FlagSubmunition : (byte)0,
             };
-            NetworkManager.Instance.BroadcastToClients(msg);
-            CaptureState.RecordSpawn(msg);
-            Telemetry.Count(isDecoy ? "v2.capturedDecoy" : "v2.capturedSpawn");
+        }
+    }
+
+    /// <summary>Put every round still in the air back in the ledger, at the session
+    /// boundary, after <c>CaptureState.Clear()</c> has emptied it.
+    ///
+    /// The clear is right and stays: it is what closed the ghosts of item 44, where
+    /// the PREVIOUS mission's ledger entries were replayed into the next battle. But
+    /// it also threw away the entries for rounds that are in the air RIGHT NOW, and
+    /// the ledger is the only record either self-heal path has - EntityCensusManager
+    /// builds its manifest from UnitRegistry plus the ledger, and HandleDiffRequest
+    /// can only replay from the ledger. So after a mid-battle resync every missile,
+    /// torpedo and bomb already in flight was invisible on the client: never spawned,
+    /// never asked for, and its eventual impact addressed to an id the client had
+    /// never heard of. The save the client loads DOES contain those rounds, and the
+    /// game's own SceneCreator.LaunchWeapons re-launches them - which the launch
+    /// canary then blocks, correctly, because a locally simulated round under host
+    /// authority is a worse answer than none.
+    ///
+    /// Rebuilt from live objects rather than by preserving the old entries, which is
+    /// what keeps item 44 closed: nothing from a previous mission can survive, because
+    /// nothing that is not currently airborne in this one is looked at.</summary>
+    public static class WeaponLedgerRebuild
+    {
+        // protected on WeaponBase. Fail CLOSED if a future build renames it: ledgering
+        // an unlaunched round would have the client spawn replicas for missiles still
+        // sitting in their tubes, which is worse than the gap this closes.
+        private static readonly System.Reflection.FieldInfo? _isLaunchedField =
+            AccessTools.Field(typeof(WeaponBase), "_isLaunched");
+
+        private static bool _warned;
+
+        public static void Run()
+        {
+            if (_isLaunchedField == null)
+            {
+                if (!_warned)
+                {
+                    _warned = true;
+                    Plugin.Log.LogWarning("[Session] WeaponBase._isLaunched not found - in-flight " +
+                        "weapons will not survive this sync (cannot tell airborne rounds from stowed).");
+                }
+                return;
+            }
+
+            int n = Relist(UnitRegistry.Missiles)
+                  + Relist(UnitRegistry.Torpedoes)
+                  + Relist(UnitRegistry.Bombs);
+
+            if (n > 0)
+                Plugin.Log.LogInfo($"[Session] Re-ledgered {n} weapon(s) still in flight — " +
+                    "the census will replay them to the client after the load.");
+        }
+
+        private static int Relist<T>(IReadOnlyList<T> weapons) where T : WeaponBase
+        {
+            int n = 0;
+            for (int i = 0; i < weapons.Count; i++)
+            {
+                var wb = weapons[i];
+                if (wb == null || wb.IsDestroyed || wb.UniqueID == 0) continue;
+                if (!(_isLaunchedField!.GetValue(wb) is bool launched) || !launched) continue;
+
+                // isSubmunition is not recoverable after the fact - it is an argument to
+                // the launch, not state on the round. It only marks the spawn as a
+                // submunition for the client's presentation, so a re-ledgered cluster
+                // round loses that nuance and nothing else.
+                var msg = Patch_V2_WeaponLaunch_Capture.Build(wb, wb._initialSetTargetObject, false);
+                if (msg == null) continue;
+
+                CaptureState.RecordSpawn(msg);
+                n++;
+            }
+            return n;
         }
     }
 
