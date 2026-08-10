@@ -262,6 +262,58 @@ namespace SeapowerMultiplayer
                 ApplyToUnit(kv.Value, fromNetwork: false);
         }
 
+        /// <summary>
+        /// CLIENT: impose the host's status line, once per frame, from LateUpdate.
+        ///
+        /// ONE WRITER, ONE POINT. CurrentOrderText is a ReactiveProperty owned by
+        /// whoever wrote last, and on a guest two things were writing it. This manager
+        /// shipped the host's finished line for every visible unit and re-sent all of
+        /// them on the 10 s full sweep, while the guest's OWN state machines wrote the
+        /// local line every frame - AircraftStates.MovingInFormation.onUpdate is three
+        /// lines and all three are a write, and the vessel and helicopter twins are the
+        /// same. The log signature was pairs 0.02 s apart with 10.2 s between pairs
+        /// ("Engage Air Contact 7020 with AIM-54A…" / "Joining Formation", over and
+        /// over), and the player read it as flicker on every non-leader aircraft and
+        /// ship.
+        ///
+        /// LateUpdate is the fix rather than a faster reassert: Unity guarantees it
+        /// runs after every MonoBehaviour Update - so after every state machine has had
+        /// its say - and before the frame is drawn. The host's line is therefore the
+        /// last write of the frame, every frame, and nothing is ever rendered
+        /// half-argued. Racing the state machines on a 0.5 s timer could only ever swap
+        /// which of them won, which is precisely what the flicker was.
+        ///
+        /// AND IT SETTLES THE OTHER HALF. The 0.5 s reassert used to rewrite this line
+        /// too, comparing against the unit's CURRENT value - so it also undid anything
+        /// that corrected a line locally, twice a second, for reasons it could not see.
+        /// Moving the write out of that loop leaves the reassert to the mounts and
+        /// gives the line exactly one producer. A local correction is no longer
+        /// something to be fought or protected: it belongs in this method, where the
+        /// host's text is turned into the text this machine shows.
+        /// </summary>
+        public static void ClientLateAssertText()
+        {
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (_desired.Count == 0) return;
+
+            foreach (var kv in _desired)
+            {
+                var e = kv.Value;
+                var unit = StateSerializer.FindById(e.UniqueId);
+                if (unit == null || unit.IsDestroyed) continue;
+
+                var line = unit.CurrentOrderText;
+                if (line == null) continue;
+
+                // Reference-equal on the common path: the value written is the same
+                // string instance held in _desired, so a line nothing has touched
+                // since the last frame costs one pointer compare.
+                if (line.Value == e.OrderText) continue;
+
+                line.Value = e.OrderText;
+            }
+        }
+
         private static void ApplyToUnit(UnitStatusMessage.Entry e, bool fromNetwork)
         {
             var unit = StateSerializer.FindById(e.UniqueId);
@@ -269,9 +321,9 @@ namespace SeapowerMultiplayer
             // died here still sits in _desired until the host's next full sweep.
             if (unit == null || unit.IsDestroyed) return;
 
-            var line = unit.CurrentOrderText;
-            if (line != null && line.Value != e.OrderText)
-                line.Value = e.OrderText;
+            // The status LINE is not written here - see ClientLateAssertText. It is the
+            // one field on this entry a local writer also competes for, so it is imposed
+            // once a frame from LateUpdate instead of from two cadences at once.
 
             // Fuel on a REAL update only. The reassert replays this same entry twice a
             // second off _desired, and re-imposing a fuel figure the client has since
