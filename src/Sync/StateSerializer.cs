@@ -1035,11 +1035,104 @@ namespace SeapowerMultiplayer
                         Plugin.Log.LogWarning($"[Order] unhandled: {msg.Order}");
                         break;
                 }
+
+                // The side effects a relayed order never inherited. Both run inside the
+                // ApplyingFromNetwork scope, so nothing they touch echoes back out.
+                ApplySingleplayerSideEffects(unit, msg.Order);
             }
             finally
             {
                 ApplyingFromNetwork = false;
             }
+        }
+
+        /// <summary>What the single-player path would have done around the order, and
+        /// this one did not.
+        ///
+        /// Every case above rebuilds the ORDER and nothing else. In the game, a player
+        /// giving that same order goes through a UI state that does two further things
+        /// on the way past, and a relayed order reaching the unit directly skips both -
+        /// so the unit obeys while the rest of the world still believes what it did
+        /// before the click.</summary>
+        private static void ApplySingleplayerSideEffects(ObjectBase unit, Messages.OrderType order)
+        {
+            if (GrantsFormationIndependence(order)) GrantIndependence(unit);
+            if (ClearsStandingRtb(order))           ClearStandingRtb(unit);
+        }
+
+        /// <summary>Orders whose single-player path calls
+        /// <c>Formation.MakeUnitActIndependently</c> - UnitSelectedState (move/waypoint),
+        /// AttackingState (attack), SonobuoyLineState / DipSonarPlacementState, and
+        /// InitScoutOrder - each granting it as the player commits the order.
+        ///
+        /// NOT speed, heading, depth or EMCON: those are things a unit does while
+        /// holding station, and granting independence for them would break every
+        /// formation the moment somebody changed speed.
+        ///
+        /// NOT AttackTarget either, and the distinction matters. Its single-player path
+        /// (UnitSelectedState.AircraftAttackByClick) writes _objectToDestroy and nothing
+        /// else, so a designated wingman keeps its station and engages when the target
+        /// comes into range. Granting independence there splits the pair - the host's
+        /// copy detaches while the owner's does not, and the "Return to Formation" menu
+        /// item is enabled off ObjectBase.ActsIndependentlyInFormation, read from the
+        /// LOCAL station - so the owner would be unable to recall a plane the host had
+        /// let wander.</summary>
+        private static bool GrantsFormationIndependence(Messages.OrderType order) =>
+            order == Messages.OrderType.MoveTo
+            || order == Messages.OrderType.FireWeapon
+            || order == Messages.OrderType.DropSonobuoy
+            || order == Messages.OrderType.AttackAtWaypoint;
+
+        /// <summary>Orders whose single-player path ends in
+        /// <c>setOrder(Order.Type.None, ...)</c> - OrderSetCourse and ObjectBase.CeaseFire
+        /// both do, which is how a player's own click releases an aircraft from RTB.
+        ///
+        /// RemoveWaypoints is deliberately NOT here. SPMM captures
+        /// ObjectBase.RemoveWaypoints directly, and the deck-side ReturnToBase.onEnter
+        /// calls it while INITIALISING an RTB - so that byte on the wire means "the RTB
+        /// is setting itself up" as often as "the player wants out of it", and clearing
+        /// on it would cancel the RTB the host had just begun.</summary>
+        private static bool ClearsStandingRtb(Messages.OrderType order) =>
+            order == Messages.OrderType.MoveTo
+            || order == Messages.OrderType.Stop
+            || order == Messages.OrderType.ClearOrders
+            || order == Messages.OrderType.AttackAtWaypoint;
+
+        /// <summary>UnitFormation.OnUpdate drags any non-leader station back to formation
+        /// unless UnitActsIndependently is set (UnitFormation.cs:1282), and the only
+        /// writers are the local input paths. A relayed order rebuilt the task without
+        /// going near them, so the station still believed it was keeping formation and
+        /// the unit was pulled back on the next pass while its new order tried to run -
+        /// playtest 34's "flickering between engaging track and returning to formation",
+        /// with the host's log showing one relayed task re-inserted four times against a
+        /// single target.
+        ///
+        /// An engage task is not a waypoint, so OnUpdate's !HasWaypoints() guard does not
+        /// stop it either. MakeUnitActIndependently no-ops for a leader and for a unit
+        /// with no station, so it needs no guard of its own.</summary>
+        private static void GrantIndependence(ObjectBase unit)
+            => unit.Formation?.MakeUnitActIndependently(unit);
+
+        /// <summary>The aircraft state machine leaves the RTB family on one condition -
+        /// CurrentOrder.Value.OrderType != ReturnToBase - and nothing in the relayed
+        /// path was writing CurrentOrder at all. A rebuilt MoveTo is a bare
+        /// setWaypointTask, so on the host the other player's aircraft flew the new
+        /// order (a waypoint task runs whatever state it is in) while ReturnToBase /
+        /// Winchester stood for the rest of the battle: playtest 37's "it follows it but
+        /// status still shows RTB winchester".
+        ///
+        /// displayOrderText false - the machine whose player clicked has already put the
+        /// line in its own order log, and this is the other one.</summary>
+        private static void ClearStandingRtb(ObjectBase unit)
+        {
+            var order = unit.CurrentOrder?.Value;
+            if (order == null || order.OrderType != Order.Type.ReturnToBase) return;
+
+            // Cast disambiguates the ObjectBase overload from the GeoPosition one, and
+            // picks the same one the game's own clear uses (ObjectBase.cs:2850).
+            unit.setOrder(Order.Type.None, (ObjectBase)null!, displayOrderText: false);
+            Plugin.Log.LogInfo($"[Order] cleared standing ReturnToBase on {unit.name} " +
+                               "- superseded by a relayed order");
         }
 
         /// <summary>Formation membership, shape and formation-wide orders. Runs inside
