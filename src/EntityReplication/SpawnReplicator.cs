@@ -97,6 +97,25 @@ namespace SeapowerMultiplayer
                     UnitIdentityApplier.Apply(existing, msg);
                     return;
                 }
+
+                // Still flagged deck-phase, and now naming a leader: the host's
+                // formation capture re-sending the launch's flight the moment
+                // launchVehicle forms it up. Everything about the puppet stays as it
+                // is - this only carries identity - so it must not reach the flip
+                // above, which is why it is tested after it and not folded in.
+                //
+                // Safe on a parented puppet: joining a formation only matters to an
+                // aircraft once InAirFormation() says so, and that returns false while
+                // _hasControl is false, which is exactly the deck phase. The station
+                // keeper switches on with the airborne flip, by which time
+                // Patch_FormationFlightPhysics_OnFixedUpdate governs it.
+                if (msg.Kind == SpawnKind.Unit && msg.FormationLeaderId != 0)
+                {
+                    UnitIdentityApplier.Apply(existing, msg);
+                    Telemetry.Count("v2.spawnDeckFormation");
+                    return;
+                }
+
                 Telemetry.Count("v2.spawnDuplicate");
                 return;
             }

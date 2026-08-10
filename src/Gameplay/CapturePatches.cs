@@ -701,6 +701,37 @@ namespace SeapowerMultiplayer
             Telemetry.Count("v2.capturedAirborne");
             Plugin.Log.LogInfo($"[Capture] Airborne flip id={unit.UniqueID} ({unit.name})");
         }
+
+        /// <summary>A still-on-deck launch has just been given its flight - update the
+        /// ledger entry and re-send it, so the client can join the replica to the
+        /// formation now instead of at wheels-up. See
+        /// <see cref="Patch_V2_DeckFormation_Capture"/> for why the gap existed.
+        ///
+        /// Deck phase is NOT cleared here and the deck flag stays on the message: the
+        /// aircraft is still parented to the ship, and the client's wheels-up branch
+        /// keys off that flag being absent. The callsign rides along because
+        /// getObjectToLaunch writes it before launchVehicle forms the flight up, so by
+        /// the time this fires it is real too.</summary>
+        internal static void OnFormationKnown(ObjectBase unit)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            if (unit == null) return;
+            if (!CaptureState.DeckPhase.Contains(unit.UniqueID)) return;
+            if (!CaptureState.SpawnLedger.TryGetValue(unit.UniqueID, out var spawn)) return;
+
+            // Null on the detach half of the setter, and on a formation torn down
+            // mid-launch. Nothing to join, and 0 is what the client already holds.
+            var leader = unit.Formation?.LeaderStation?.UnitObject;
+            if (leader == null || leader.UniqueID == 0) return;
+            if (spawn.FormationLeaderId == leader.UniqueID) return; // already told
+
+            spawn.FormationLeaderId = leader.UniqueID;
+            spawn.UnitName = unit._obp?._objectName ?? spawn.UnitName;
+
+            NetworkManager.Instance.BroadcastToClients(spawn);
+            Telemetry.Count("v2.capturedDeckFormation");
+            Plugin.Log.LogInfo($"[Capture] Deck flight id={unit.UniqueID} joins leader {leader.UniqueID}");
+        }
     }
 
     [HarmonyPatch(typeof(ObjectsManager), nameof(ObjectsManager.createAircraft))]
@@ -723,6 +754,29 @@ namespace SeapowerMultiplayer
             => AircraftSpawnCapture.OnUnitCreated(__result, UnitType.Helicopter, squadronReference,
                 loadoutVariant, homeBase, parent, helicopterIniName, helicopterNumber, geoPosition, heading,
                 taskForce, nationOverride);
+    }
+
+    /// <summary>A deck launch learns its flight AFTER its spawn has gone out, and
+    /// waiting for wheels-up to say so is a visible gap.
+    ///
+    /// FlightDeck.launchVehicle creates the aircraft (getObjectToLaunch →
+    /// createAircraft, where the spawn capture fires) and only then forms it up, a
+    /// few lines later - so the deck-phase spawn genuinely has no formation to
+    /// report and goes out with FormationLeaderId 0. Until now the first message
+    /// carrying the flight was the wheels-up re-send, which is minutes of ready-up
+    /// later: on the client those aircraft sat in the formation manager unattached
+    /// for the whole deck phase and then snapped into a flight as they lifted off,
+    /// while the host showed them in it from the moment they appeared.
+    ///
+    /// Re-sending the ledger entry from the formation call closes that without a new
+    /// message or a protocol field - it is the same EntitySpawn, updated in place,
+    /// and the census already replays whatever the ledger holds. The unit STAYS in
+    /// DeckPhase: this is an identity update, not the airborne flip, and the
+    /// wheels-up re-send still has to follow.</summary>
+    [HarmonyPatch(typeof(ObjectBase), "set_Formation")]
+    public static class Patch_V2_DeckFormation_Capture
+    {
+        static void Postfix(ObjectBase __instance) => AircraftSpawnCapture.OnFormationKnown(__instance);
     }
 
     [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.giveControl))]

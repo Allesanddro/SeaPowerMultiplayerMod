@@ -212,7 +212,9 @@ namespace SeapowerMultiplayer
             CaptureState.Clear();
             HatchStateCapture.Clear();
             Patch_V2_MissionEnd_Capture.Reset();
-            EntityCensusManager.Reset();
+            EntityCensusManager.Reset();            
+            FlightDeckStreamer.Reset();
+            FlightDeckStateApplier.Reset();
 
             // PvP: flush stale engage tasks on enemy puppet units so the remote
             // player's save-restored tasks don't fire without their say-so.
@@ -414,7 +416,8 @@ namespace SeapowerMultiplayer
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
                 Patch_Submarine_SetDepth.Reset();
-                OrderDeduplicator.Clear();
+                OrderDeduplicator.Clear();                
+                FlightDeckStateApplier.Reset();
 
                 _pendingRngSeed = msg.RngSeed;
                 _pendingGameSeconds = msg.GameSeconds;
