@@ -1260,6 +1260,86 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>HOST-side PvP: the remote player's decks ready up on the PLAYER clock,
+    /// not the AI convenience clock.
+    ///
+    /// PendingLaunchTask's constructor discounts the ready-up for a non-player deck:
+    ///
+    ///   _duration = loadout._readyUpDuration * LaunchCount;
+    ///   if (!_flightDeck._baseObject.IsPlayerObject) {
+    ///       ModifyDurationForAI(...);
+    ///       _duration -= _flightDeck._activeTime * LaunchCount;   // ← the discount
+    ///   }
+    ///
+    /// IsPlayerObject is per-machine, so on the host the OTHER player's airbase takes
+    /// the AI branch. _activeTime grows for as long as the deck has been running, and
+    /// late in a battle it exceeds a bomber's ~30-minute ready-up outright - so the task
+    /// is born with a NEGATIVE duration, instantly complete, the label flashing the
+    /// negative remainder. Playtest 40: "when I recover and then launch bombers - they
+    /// only use the recovery time and then are ready immediately - says -14 mins."
+    ///
+    /// That is a fairness break rather than a cosmetic one: one player's strike aircraft
+    /// are ready the moment they are ordered and the other's are not.
+    ///
+    /// ONLY THE MIDDLE BRANCH IS TOUCHED. The two siblings are left exactly as the
+    /// engine set them: the -1 sentinel means ready-up is switched off or the task asked
+    /// to skip it, and an explicit singleUnitReadyUpTime is a caller stating the figure
+    /// outright - which is how FlightDeck.LoadStateFromFile restores a saved task, so
+    /// recomputing there would rewrite history on every session load.
+    ///
+    /// A genuine AI deck keeps its discount, which is why the test is
+    /// HostSuppressesRemoteTfAi and not merely !IsPlayerObject.
+    ///
+    /// The companion prefix below is why this only has to correct arithmetic:
+    /// ModifyDurationForAI is not a pure calculation, so undoing its result alone would
+    /// leave the rest of what it did standing.</summary>
+    [HarmonyPatch(typeof(PendingLaunchTask), MethodType.Constructor,
+        new[] { typeof(FlightDeck), typeof(VehicleTypeOnBoard), typeof(Loadout), typeof(Squadron),
+                typeof(string), typeof(LaunchTaskParameters), typeof(float), typeof(bool) })]
+    public static class Patch_V2_RemoteTf_ReadyUpParity
+    {
+        static void Postfix(PendingLaunchTask __instance, FlightDeck flightDeck, Loadout loadout,
+                            LaunchTaskParameters ltp, float singleUnitReadyUpTime)
+        {
+            // Reproduce the constructor's own branch test rather than inferring from
+            // _duration: a negative duration is exactly what this fixes, so it cannot
+            // also be the signal for which path produced it.
+            if (!DM_TestTools._allowAircraftReadyUpTime || ltp == null || ltp._skipReadyUp) return;
+            if (!float.IsNaN(singleUnitReadyUpTime)) return;
+
+            var deck = flightDeck?._baseObject;
+            if (deck == null || loadout == null) return;
+            if (deck.IsPlayerObject) return;                        // already on the player clock
+            if (!Suppression.HostSuppressesRemoteTfAi(deck)) return; // real AI keeps the discount
+
+            float player = loadout._readyUpDuration * __instance.LaunchCount;
+            if (System.Math.Abs(__instance._duration - player) < 0.01f) return;
+
+            Plugin.Log.LogInfo($"[Deck] Ready-up parity on {deck.getUIDAndName()}: " +
+                $"{__instance._duration:F0}s -> {player:F0}s (remote player's deck, not AI)");
+            __instance._duration = player;
+        }
+    }
+
+    /// <summary>The other half of ready-up parity, and the reason the postfix above can
+    /// be a simple assignment.
+    ///
+    /// ModifyDurationForAI is not a calculation - it SPENDS the deck's pre-prepared
+    /// aircraft. It sorts _flightDeck._aiPreparationData, decrements the matching
+    /// entries' _launchCount and drops them once exhausted. Correcting _duration
+    /// afterwards therefore fixes the number the player sees while leaving the remote
+    /// player's deck quietly stripped of preparation data it was never meant to draw on,
+    /// and that consumption is not visible anywhere it would be noticed.
+    ///
+    /// So it is refused outright for a deck the other player owns, and the duration
+    /// arithmetic is then the postfix's only job. Genuine AI decks are untouched.</summary>
+    [HarmonyPatch(typeof(PendingLaunchTask), nameof(PendingLaunchTask.ModifyDurationForAI))]
+    public static class Patch_V2_RemoteTf_NoAiPreparationSpend
+    {
+        static bool Prefix(PendingLaunchTask __instance) =>
+            !Suppression.HostSuppressesRemoteTfAi(__instance._flightDeck?._baseObject);
+    }
+
     /// <summary>HOST-side PvP: give the remote player's aircraft the winchester rules
     /// THEIR player set, not this machine's.
     ///
