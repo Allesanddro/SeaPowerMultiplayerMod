@@ -692,24 +692,56 @@ namespace SeapowerMultiplayer
             if (formations == null) return;
 
             for (int f = formations.Count - 1; f >= 0; f--)
+                EvictCorpses(formations[f]);
+        }
+
+        /// <summary>The per-formation half of the scan above.</summary>
+        internal static void EvictCorpses(UnitFormation? formation)
+        {
+            var stations = formation?.Stations;
+            if (stations == null) return;
+
+            for (int s = stations.Count - 1; s >= 0; s--)
             {
-                var formation = formations[f];
-                var stations = formation?.Stations;
-                if (stations == null) continue;
+                var station = stations[s];
+                // Unity's operator, so a DESTROYED object reads as null here and is
+                // already screened out by the binding - the one that gets through is
+                // a live pooled object recycled out from under the station.
+                if (station?.UnitObject == null || station.UnitObject._obp != null) continue;
 
-                for (int s = stations.Count - 1; s >= 0; s--)
-                {
-                    var station = stations[s];
-                    // Unity's operator, so a DESTROYED object reads as null here and is
-                    // already screened out by the binding - the one that gets through is
-                    // a live pooled object recycled out from under the station.
-                    if (station?.UnitObject == null || station.UnitObject._obp != null) continue;
-
-                    Plugin.Log.LogWarning($"[V2] Formation '{formation!.Name}' was seating a " +
-                        "recycled object with no parameters - emptying the station.");
-                    station.UnitObject = null;
-                }
+                Plugin.Log.LogWarning($"[V2] Formation '{formation!.Name}' was seating a " +
+                    "recycled object with no parameters - emptying the station.");
+                station.UnitObject = null;
             }
+        }
+
+        /// <summary>Clear a formation's corpses and report whether it can safely take an
+        /// AddUnit right now. Call before every replicated join.
+        ///
+        /// AddUnit mutates Stations, and TrulyObservableCollection answers that with
+        /// Stations_CollectionChanged, which re-reads InFormationSummary through Noesis
+        /// AND calls CalculateAirUnitNames. Both walk the station list dereferencing
+        /// <c>UnitObject._obp</c> with no guard of their own (UnitFormation.cs:169
+        /// and :311), so one recycled corpse still seated anywhere in the formation
+        /// takes the join down - and with it the rest of whatever order or spawn was
+        /// being applied. That is the second of playtest 28's two client NRE stacks,
+        /// reported from both the order path and the spawn path, ~12 a battle.
+        ///
+        /// The leader test is the reason this returns a bool rather than just sweeping.
+        /// Emptying a corpse's seat can leave the LEADER's seat empty, and
+        /// CalculateAirUnitNames opens by dereferencing
+        /// <c>LeaderStation.UnitObject._obp._objectName</c> - so joining straight after
+        /// a sweep that unseated the leader trades one NRE for another. The formation
+        /// hands the lead over itself on its next update (UnitOnStationNotValid →
+        /// AssignNewLeaderFromAvailableUnits); waiting a frame is free, because both
+        /// callers already retry.</summary>
+        internal static bool PrepareForJoin(UnitFormation? formation)
+        {
+            if (formation == null) return false;
+            EvictCorpses(formation);
+
+            var leader = formation.LeaderStation?.UnitObject;
+            return leader != null && leader._obp != null;
         }
 
         public static void HandleDestroyEvent(DestroyEventMessage msg)

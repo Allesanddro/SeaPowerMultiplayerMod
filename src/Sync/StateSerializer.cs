@@ -411,6 +411,26 @@ namespace SeapowerMultiplayer
             return Globals._playerTaskforce.PlottingTable?.VehicleForObject(unit);
         }
 
+        /// <summary>Throttled per (unit, order, reason) like the refusal log on the send
+        /// side. A misresolved id repeats for as long as whatever produced it lives, so
+        /// this must never be a per-message write.</summary>
+        private static readonly Dictionary<(int, Messages.OrderType, string), float> _rejectThrottle = new();
+
+        /// <summary>Cleared with the rest of the order bookkeeping at a session
+        /// boundary - the keys are entity ids, and those are only meaningful within
+        /// one battle.</summary>
+        internal static void ClearRejectThrottle() => _rejectThrottle.Clear();
+
+        private static void LogRejectedOrder(PlayerOrderMessage msg, ObjectBase unit, string reason)
+        {
+            var key = (msg.SourceEntityId, msg.Order, reason);
+            if (_rejectThrottle.TryGetValue(key, out var next) && Time.unscaledTime < next) return;
+            _rejectThrottle[key] = Time.unscaledTime + 5f;
+
+            Plugin.Log.LogWarning($"[Order] entity={msg.SourceEntityId} order={msg.Order} dropped — " +
+                                  $"{reason} (unit={unit.name})");
+        }
+
         public static void Apply(PlayerOrderMessage msg)
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
@@ -425,6 +445,38 @@ namespace SeapowerMultiplayer
                     _orderNotFoundCount = 0;
                     _lastOrderNotFoundLogTime = Time.unscaledTime;
                 }
+                return;
+            }
+
+            // Id-space collision defence, and the reason it is defence in DEPTH: the
+            // precondition was removed when the guest's allocator got its id floor, so
+            // nothing should reach here misresolved. FindById still answers from
+            // whichever registry hits first with no notion of which id space the caller
+            // holds, so a stale pre-floor id or a future regression lands a unit order
+            // on a pooled decoy and it silently takes it - playtest 28's id 2446, which
+            // spawned as an aircraft and then answered as usn_rr144_chaff for every
+            // order aimed at it. UnitReplicaDriver.Apply has had this check all along;
+            // the order path did not.
+            //
+            // A weapon is never a legitimate target for a player order in either
+            // direction - OrderSyncHelper refuses to ORIGINATE one for a WeaponBase at
+            // both ends, so anything arriving for one is misresolved by definition.
+            if (unit is WeaponBase)
+            {
+                LogRejectedOrder(msg, unit, "resolved onto a weapon");
+                return;
+            }
+
+            // A pooled object handed back with its parameters stripped. Nothing
+            // downstream expects one: Order.setOrder → SearchForHomeBase →
+            // CanAcceptAircraft dereferences vehicle._obp._objectIniName inside a
+            // FindIndex predicate (ObjectBase.cs:8479) with no guard, though the same
+            // method does guard its OWN _obp eleven lines earlier. That throw is the
+            // first of playtest 28's two client NRE stacks, 18 a battle, and every one
+            // abandoned the rest of that order's application.
+            if (unit._obp == null)
+            {
+                LogRejectedOrder(msg, unit, "recycled object with no parameters");
                 return;
             }
 
@@ -1005,6 +1057,17 @@ namespace SeapowerMultiplayer
                 {
                     var target = StateSerializer.FindById(msg.TargetEntityId)?.Formation;
                     if (target == null || target == formation) break;
+                    // See SpawnReplicator.PrepareForJoin - a corpse still seated in the
+                    // target takes AddUnit down through the collection-changed handlers,
+                    // and with it the rest of this order. Unlike the spawn path there is
+                    // no retry here; the membership re-establishes from the next spawn
+                    // or census replay, which is cheaper than an exception mid-drain.
+                    if (!SpawnReplicator.PrepareForJoin(target))
+                    {
+                        Plugin.Log.LogWarning($"[Formation] Join deferred: target formation of " +
+                                              $"{msg.TargetEntityId} is not fit to seat {unit.UniqueID}");
+                        break;
+                    }
                     formation?.DetachUnit(unit);
                     target.AddUnit(unit);
                     break;

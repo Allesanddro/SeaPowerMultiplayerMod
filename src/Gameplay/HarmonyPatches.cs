@@ -1815,6 +1815,7 @@ namespace SeapowerMultiplayer
         internal static void Clear()
         {
             OrderSyncHelper.ClearRefusalLogThrottle();
+            OrderHandler.ClearRejectThrottle();
             _cache.Clear();
             _lastSendTime.Clear();
         }
