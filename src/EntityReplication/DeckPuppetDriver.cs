@@ -97,11 +97,53 @@ namespace SeapowerMultiplayer
             h._helicopterAnimation?.setAnimsForTakeoff();
             // engageRotors(false), not stopRotors(): the latter starts a spin-DOWN,
             // which is a fair description of a helo shutting down and a poor one for
-            // a machine that was never running. This just clears _rotorsOn so the
-            // RPM the creator stamped in decays away.
+            // a machine that was never running.
             h._hfcs?.engageRotors(false);
 
+            // The RPM NUMBER, not just the switch. engageRotors(false) only stops it
+            // CLIMBING; setImmediateFlightConditions already stamped _rotorCurrentRPM
+            // to full at creation and the stock decay is 2.5% of max per second, so it
+            // still reads as spinning for the better part of a minute. Two things
+            // sample it, and they disagreed: the blade animation cuts out below 1%
+            // (HelicopterFlightControlSystem.cs:167), which is why the rotors LOOKED
+            // stopped, while _hoverWavesOverlay recomputes the downwash water disc from
+            // GetRelativeRPM every frame and only switches off below 0.1
+            // (Helicopter.cs:345). Hence a parked helo with still blades churning the
+            // sea under itself.
+            if (_rotorCurrentRpmField?.GetValue(h._hfcs) is float[] rpm)
+                for (int i = 0; i < rpm.Length; i++) rpm[i] = 0f;
+
+            // Audio does not read RPM at all: GiveControl latches _rotorsFlightStarted
+            // (Helicopter.cs:1263) and the creator called it on the way past, so the
+            // flight loop was playing on a cold airframe. Stopping the sources alone
+            // will not do - the latch is still up and OnUpdate re-plays the loop on the
+            // next frame - so it has to be cleared first.
+            _rotorsFlightStartedField?.SetValue(h, false);
+            StopRotorAudio(h);
+
             if (_puppets.TryGetValue(unit.UniqueID, out var p)) p.Parked = true;
+        }
+
+        // Both private on their own class, and both are state the CREATOR set that has
+        // no public undo. Resolved once and allowed to degrade: on a build that renames
+        // either, the launch still replicates and only the cosmetic park is lost - the
+        // same trade FlightDeckStreamer makes for CrewSkill.
+        private static readonly System.Reflection.FieldInfo? _rotorCurrentRpmField =
+            HarmonyLib.AccessTools.Field(typeof(HelicopterFlightControlSystem), "_rotorCurrentRPM");
+        private static readonly System.Reflection.FieldInfo? _rotorsFlightStartedField =
+            HarmonyLib.AccessTools.Field(typeof(Helicopter), "_rotorsFlightStarted");
+
+        /// <summary>Silence a parked airframe. Unity's null operator throughout - these
+        /// are scene objects, and `?.` would happily call Stop on a destroyed one.</summary>
+        private static void StopRotorAudio(Helicopter h)
+        {
+            var hp = h._hp;
+            if (hp == null) return;
+
+            if (hp._enginePowerUpAudioSource   != null) hp._enginePowerUpAudioSource.Stop();
+            if (hp._engineLoopAudioSource      != null) hp._engineLoopAudioSource.Stop();
+            if (hp._rotorsIdleLoopAudioSource  != null) hp._rotorsIdleLoopAudioSource.Stop();
+            if (hp._rotorsFlightLoopAudioSource != null) hp._rotorsFlightLoopAudioSource.Stop();
         }
 
         /// <summary>Stock spool, replayed on the puppet: HelicopterTakeOff.onEnter runs

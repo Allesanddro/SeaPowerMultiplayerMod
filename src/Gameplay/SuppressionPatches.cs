@@ -191,6 +191,51 @@ namespace SeapowerMultiplayer
         static bool Prefix() => !Suppression.ClientActive;
     }
 
+    /// <summary>The cost of that kill-switch, paid once per received session.
+    ///
+    /// FlightDeck.addFlightDeckTask defaults to delayed:true, which only STAGES a task
+    /// in _flightDeckTasksToAdd; handleFlightDeckTasks is what migrates the staging
+    /// list into FlightDeckTasks - and the patch above stops it running at all on a
+    /// client. FlightDeck.LoadStateFromFile rebuilds every saved task through that same
+    /// delayed add (FlightDeck.cs:2681 for pending launches, :2777 and :2950 for the
+    /// active ones), so on a guest they all loaded correctly and then sat in the
+    /// staging list for the rest of the battle: not in FlightDeckTasks, so not in the
+    /// Flight Ops window and not seen by FlightDeckStateApplier's reconcile either.
+    ///
+    /// The save has already spent them - CreatePendingLaunchTask decrements
+    /// squadron.Numbers and vehicle.Numbers before the save is written - so a strike
+    /// readied before the battle was missing from the deck AND from the hangar on the
+    /// other machine, with nothing to say so. One suppression, which is why it hit
+    /// carrier, ASW escort and airfield identically.
+    ///
+    /// Draining is exactly what the suppressed method would have done for the add
+    /// list, and nothing else: the pump stays off, so the queue still never advances
+    /// or spawns aircraft locally. Postfixed on the load itself rather than swept
+    /// later, so the deck is whole before anything reads it.</summary>
+    [HarmonyPatch(typeof(FlightDeck), "LoadStateFromFile",
+        new[] { typeof(IniHandler), typeof(string) })]
+    public static class Patch_V2_FlightDeckLoad_Drain
+    {
+        static void Postfix(FlightDeck __instance)
+        {
+            // Not Suppression.ClientActive: a session load is exactly when the
+            // handshake may not be up yet, and on a client the pump never runs at any
+            // point, so migrating early is always right.
+            if (Plugin.Instance.CfgIsHost.Value) return;
+
+            var staged = __instance._flightDeckTasksToAdd;
+            if (staged == null || staged.Count == 0) return;
+
+            int n = staged.Count;
+            for (int i = 0; i < n; i++) __instance.FlightDeckTasks.Add(staged[i]);
+            staged.Clear();
+
+            Plugin.Log.LogInfo($"[FlightDeck] {__instance._baseObject?.getUIDAndName()}: " +
+                $"restored {n} saved deck task(s) from the session " +
+                $"(queue now {__instance.FlightDeckTasks.Count})");
+        }
+    }
+
     /// <summary>Companion kill-switch: handleFlightDeckTasks only drives onUpdate;
     /// state-machine TRANSITIONS are evaluated in FlightDeckTask.fixedTickStateMachine,
     /// called from FlightDeck.OnFixedUpdate which still runs client-side. Without this
