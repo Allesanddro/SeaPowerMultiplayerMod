@@ -588,8 +588,9 @@ namespace SeapowerMultiplayer
     ///
     /// Left alone deliberately: Loitering, PlayerOverride, PerformingAirOps,
     /// AvoidingCollision, Aligning and EmergencySurface are not gated on ownership -
-    /// a player's own boat uses them too. CounterLaunch and TorpedoEvasion are
-    /// auto-defence, handled by their own patch above.</summary>
+    /// a player's own boat uses them too. TorpedoEvasion is auto-defence and has its
+    /// own patch above; CounterLaunch is the same shape but is registered through this
+    /// one - see the AiEntry list.</summary>
     public static class RemoteTfSubStates
     {
         private static readonly System.Collections.Generic.HashSet<System.Type> AiEntry = new()
@@ -603,6 +604,12 @@ namespace SeapowerMultiplayer
             typeof(SubmarineStates.GuidingMissiles),
             typeof(SubmarineStates.OpeningToFiringRange),
             typeof(SubmarineStates.ReacquireContact),
+            // Auto counter-launch (Submarine.cs:246). The comment below used to say the
+            // torpedo-evasion patch covered this; it does not - that one matches only
+            // the two TorpedoEvasion types. Same AtAny registration and the same
+            // (DM._subAIAppliesToPlayer || !IsPlayerObject) gate, so it belongs here.
+            // Its escape (:247) is IsFinished, ungated, so blocking entry cannot strand.
+            typeof(SubmarineStates.CounterLaunch),
         };
 
         private static readonly System.Collections.Generic.HashSet<System.Type> MovementCluster = new()
@@ -653,6 +660,97 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>HOST-side PvP: the SURFACE half of the same crew-autonomy layer - the
+    /// ASW sprint-and-drift cycle a towed-array escort runs while keeping station.
+    ///
+    /// Vessel.initStates builds it as a ring: MovingInFormation → FormationSprint →
+    /// FormationDrift → ClearBafflesTurningBack → FormationClearBafflesListening →
+    /// FormationSprint (Vessel.cs:123-130). Only the door at :123 carries the
+    /// ownership gate - <c>(DM._subAIAppliesToPlayer || !IsPlayerObject)</c>, the same
+    /// test the whole of item 22 turns on - and _subAIAppliesToPlayer is off by
+    /// default, so the game never runs any of this for a player's own ship. On the
+    /// host the remote player's escorts are not player objects, so they ran the cycle
+    /// unbidden: the owner's ships sprinting ahead and coasting back, at speeds the
+    /// owner did not set.
+    ///
+    /// AND IT IS THE LAST OF THE TELEGRAPH FLOOD. Each of these three states calls
+    /// setTelegraph on entry, Patch_Vessel_SetTelegraph puts every one on the wire, and
+    /// no existing flag covers them - the origination half of item 10 that survived the
+    /// ReturnToFormation work. Silencing the states silences their telegraphs at
+    /// source, which is better than filtering them afterwards: the ship never picks the
+    /// speed in the first place.
+    ///
+    /// EVERY entry into FormationSprint is blocked, not just the gated door, because
+    /// the ring's own :130 loop-back would otherwise restart it forever. And a ship
+    /// already inside the ring when hosting begins is forced out to MovingInFormation -
+    /// the ring's escapes (:124, :126, :129, :134-136) are speed- and
+    /// FollowingFormation-conditioned rather than ownership-gated, so without this it
+    /// could circle indefinitely on a slow leader.</summary>
+    public static class RemoteTfVesselFormationStates
+    {
+        private static readonly System.Collections.Generic.HashSet<System.Type> Ring = new()
+        {
+            typeof(VesselStates.FormationSprint),
+            typeof(VesselStates.FormationDrift),
+            typeof(VesselStates.ClearBafflesTurningBack),
+            typeof(VesselStates.FormationClearBafflesListening),
+        };
+
+        /// <summary>Each state holds its own <c>private Vessel _vessel</c>, assigned in
+        /// the constructor before initStates registers anything - resolved once here so
+        /// the per-tick predicate carries no reflection.</summary>
+        private static Vessel? OwnerOf(IState? state)
+        {
+            if (state == null) return null;
+            var field = AccessTools.Field(state.GetType(), "_vessel");
+            if (field == null)
+            {
+                Plugin.Log.LogWarning($"[Suppression] {state.GetType().Name}._vessel not found - the remote " +
+                    "player's escorts will keep running the ASW sprint-and-drift cycle on their own");
+                return null;
+            }
+            return field.GetValue(state) as Vessel;
+        }
+
+        internal static void Gate(IState? from, IState? to, ref System.Func<bool> predicate)
+        {
+            if (predicate == null || to == null) return;
+
+            // Door: no remote-owned ship may enter the ring at all.
+            if (to is VesselStates.FormationSprint)
+            {
+                var ship = OwnerOf(to);
+                if (ship == null) return;
+                var inner = predicate;
+                predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(ship);
+                return;
+            }
+
+            // Escape: force the way out for a ship caught inside when hosting starts.
+            if (to is VesselStates.MovingInFormation && from != null && Ring.Contains(from.GetType()))
+            {
+                var ship = OwnerOf(from);
+                if (ship == null) return;
+                var inner = predicate;
+                predicate = () => inner() || Suppression.HostSuppressesRemoteTfAi(ship);
+            }
+        }
+    }
+
+    /// <summary>HOST-side PvP: AI.KeepTowedArrayStreamed, which re-streams a towed array
+    /// the crew thinks should be out.
+    ///
+    /// Self-gated in the engine as <c>(!DM._subAIAppliesToPlayer &amp;&amp;
+    /// IsPlayerObject) → return</c> (AI.cs:3259), so a player's own boat is left to
+    /// manage its own array. The remote player's was not, and the array would re-deploy
+    /// under an owner who had just stowed it.</summary>
+    [HarmonyPatch(typeof(AI), "KeepTowedArrayStreamed")]
+    public static class Patch_V2_RemoteTf_TowedArray_Suppress
+    {
+        static bool Prefix(ObjectBase ____baseObject) =>
+            !Suppression.HostSuppressesRemoteTfAi(____baseObject);
+    }
+
     /// <summary>The AtAny half (Submarine.cs:254-268). Shares addAnyTransition with the
     /// torpedo-evasion patch above; Harmony runs both prefixes and each wraps the
     /// predicate it owns.</summary>
@@ -672,6 +770,7 @@ namespace SeapowerMultiplayer
         {
             RemoteTfSubStates.GateEntry(to, ref predicate);
             RemoteTfSubStates.ForceEscape(from, to, ref predicate);
+            RemoteTfVesselFormationStates.Gate(from, to, ref predicate);
         }
     }
 
