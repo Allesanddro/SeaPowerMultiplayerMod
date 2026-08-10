@@ -569,11 +569,30 @@ namespace SeapowerMultiplayer
             Order = OrderType.RemoveWaypoints,
         };
 
+        // Formation station keeping opens with a RemoveWaypoints and then re-adds the
+        // station task through an unpatched call, so relaying the clear on its own left
+        // the far side waypointless and re-armed its own station-keeping watchdog - the
+        // flood documented on Patch_UnitFormation_ReturnToFormation. Executed locally,
+        // not sent. Both sides run the same sweep off the same membership.
+        //
+        // Re-stationing (FormationRestation) is the same shape and is silenced the same
+        // way - and there it is not merely wasteful: the station op that would have
+        // carried the re-add is filtered out for aircraft formations, so the clear
+        // travelled alone and emptied every wingman's waypoint list on the far machine.
+        //
+        // Gated here rather than by wrapping the caller, so the flag stays read-only at
+        // its use sites and nothing has to be released on a paired path.
         static bool Prefix(ObjectBase __instance) =>
-            OrderSyncHelper.Prefix(__instance, Msg(__instance));
+            DerivedWaypointChurn || OrderSyncHelper.Prefix(__instance, Msg(__instance));
 
-        static void Postfix(ObjectBase __instance) =>
+        static void Postfix(ObjectBase __instance)
+        {
+            if (DerivedWaypointChurn) return;
             OrderSyncHelper.Postfix(__instance, Msg(__instance));
+        }
+
+        static bool DerivedWaypointChurn =>
+            FormationUpdate.Active || FormationRestation.Active;
     }
 
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DeleteSelectedWaypoint))]

@@ -674,7 +674,8 @@ namespace SeapowerMultiplayer
 
             for (int f = formations.Count - 1; f >= 0; f--)
             {
-                var stations = formations[f]?.Stations;
+                var formation = formations[f];
+                var stations = formation?.Stations;
                 if (stations == null) continue;
 
                 for (int s = stations.Count - 1; s >= 0; s--)
@@ -685,7 +686,7 @@ namespace SeapowerMultiplayer
                     // a live pooled object recycled out from under the station.
                     if (station?.UnitObject == null || station.UnitObject._obp != null) continue;
 
-                    Plugin.Log.LogWarning($"[V2] Formation '{formations[f].Name}' was seating a " +
+                    Plugin.Log.LogWarning($"[V2] Formation '{formation!.Name}' was seating a " +
                         "recycled object with no parameters - emptying the station.");
                     station.UnitObject = null;
                 }
