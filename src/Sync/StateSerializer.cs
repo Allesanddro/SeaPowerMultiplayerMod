@@ -769,12 +769,25 @@ namespace SeapowerMultiplayer
                     {
                         if (unit is Submarine mastSub)
                         {
-                            switch ((int)msg.Heading)
+                            int  mastId = (int)msg.Heading;
+                            bool want   = msg.Speed > 0.5f;
+
+                            // SET, not flip. The order carries the state the sender's
+                            // player asked for, so a machine already holding it has
+                            // nothing to do - which is what makes the order idempotent
+                            // and lets it survive arriving late, twice, or while the
+                            // sensor reassert is mid-argument about the same mast.
+                            // Still executed through the game's own toggle so the
+                            // Enable/Disable side effects stay the game's.
+                            if (OrderSyncHelper.MastIsUp(mastSub, mastId) != want)
                             {
-                                case 0: mastSub.toggleSnorkelMast(); break;
-                                case 1: mastSub.togglePeriscopeMast(); break;
-                                case 2: mastSub.toggleRadarMast(); break;
-                                case 3: mastSub.toggleESMMast(); break;
+                                switch (mastId)
+                                {
+                                    case 0: mastSub.toggleSnorkelMast(); break;
+                                    case 1: mastSub.togglePeriscopeMast(); break;
+                                    case 2: mastSub.toggleRadarMast(); break;
+                                    case 3: mastSub.toggleESMMast(); break;
+                                }
                             }
                         }
                         break;
