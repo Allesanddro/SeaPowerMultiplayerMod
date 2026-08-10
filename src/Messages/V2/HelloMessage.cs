@@ -13,6 +13,11 @@ namespace SeapowerMultiplayer.Messages
         public bool   IsPvP;
         /// <summary>Sea Power build the client is running (added in protocol 221).</summary>
         public string GameVersion = "";
+        /// <summary>The sender's Options → Gameplay settings, packed - see
+        /// <see cref="RemoteGameplayOptions"/>. Here rather than in a stream because
+        /// they are per-machine facts about the PLAYER, which is exactly what the
+        /// handshake is for.</summary>
+        public byte GameplayOptions;
 
         public MessageType Type => MessageType.Hello;
 
@@ -22,6 +27,7 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(PluginVersion);
             writer.Put(IsPvP);
             writer.Put(GameVersion);
+            writer.Put(GameplayOptions);
         }
 
         // GameVersion is read only if the sender actually wrote it: a pre-221 client
@@ -33,6 +39,9 @@ namespace SeapowerMultiplayer.Messages
             PluginVersion   = reader.GetString(),
             IsPvP           = reader.GetBool(),
             GameVersion     = reader.AvailableBytes > 0 ? reader.GetString() : "",
+            // Same tolerance as GameVersion above, for the same reason: an older
+            // client has to parse cleanly enough to be TOLD its protocol is wrong.
+            GameplayOptions = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
         };
     }
 }

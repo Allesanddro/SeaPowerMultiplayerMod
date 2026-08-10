@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using SeaPower;
@@ -1256,6 +1257,142 @@ namespace SeapowerMultiplayer
             Plugin.Log.LogError($"[Canary] Blocked un-authorized client weapon launch: " +
                 $"{__instance.name} ({__instance._ap?._ammunitionFileName}) — suppression leak, report this");
             return false;
+        }
+    }
+
+    /// <summary>HOST-side PvP: give the remote player's aircraft the winchester rules
+    /// THEIR player set, not this machine's.
+    ///
+    /// Every player option inside CheckWinchester is an escape hatch - each one is a
+    /// <c>return false</c> that keeps the aircraft airborne - and all of them sit behind
+    /// <c>IsPlayerObject</c>, which is false for the remote fleet on the machine that
+    /// simulates it. So their aircraft skipped every exit their owner had chosen and
+    /// went home the moment the stock rules said winchester.
+    ///
+    /// A postfix is enough precisely because of that shape: it runs only when the
+    /// engine has already said "winchester", and can only take it back. It can never
+    /// send an aircraft home that the engine was going to keep flying, whatever the
+    /// remote options say or fail to say.
+    ///
+    /// This is the GATE. Patch_V2_RemoteTf_WinchesterStamp is the other half and stays:
+    /// it deals with what happens once the state is legitimately entered (stop
+    /// re-testing, restore the pre-entry weapon status), which is parity of a different
+    /// kind and not in conflict with this.</summary>
+    [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.CheckWinchester))]
+    public static class Patch_V2_RemoteTf_WinchesterParity
+    {
+        static void Postfix(Aircraft __instance, ref bool __result)
+        {
+            if (!__result) return;                       // only ever turns it OFF
+            if (!RemoteGameplayOptions.Known) return;    // pre-handshake: engine stands
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
+
+            if (StaysAirborne(__instance)) __result = false;
+        }
+
+        /// <summary>The exits Aircraft.CheckWinchester would have taken had this been
+        /// the owner's own machine, in the engine's own order and with the engine's own
+        /// conditions - only the option VALUES come from the other player.</summary>
+        private static bool StaysAirborne(Aircraft a)
+        {
+            if (!RemoteGameplayOptions.PlanesWinchester) return true;
+
+            var initial = a._initialLoadoutCapabilities;
+            var current = a._currentLoadoutCapabilities;
+            bool fighter = a.Ap != null
+                        && a.Ap._unitRoles.Contains(ObjectBaseParameters.UnitRoles.Fighter);
+
+            // Strike and ASW share one set of exits; the engine reaches them through
+            // different outer branches but applies the same three tests.
+            if (initial.CanStrike || initial._hasASWTorpedoes)
+            {
+                if (initial._hasASWTorpedoes
+                    && RemoteGameplayOptions.ASWBombersStaysWithSonobuoys
+                    && current._hasSonobuoys) return true;
+
+                if (fighter)
+                {
+                    if (RemoteGameplayOptions.FighterBombersStaysWithAAM && current.HasAAM) return true;
+                    if (RemoteGameplayOptions.SRFightersStaysWithGuns
+                        && !initial.HasMLRAAM && current._hasGun) return true;
+                }
+                else if (RemoteGameplayOptions.BombersStaysWithAAM && current.HasAAM) return true;
+
+                return false;
+            }
+
+            if (initial.HasMLRAAM)
+                return RemoteGameplayOptions.InterceptorsStaysWithAAM && current.HasAAM;
+
+            return false;
+        }
+    }
+
+    /// <summary>The helicopter half. HelicopterStates' CheckWinchester carries exactly
+    /// one player-gated exit - the sonobuoy one - and no _playerPlanesWinchester test at
+    /// all, so this is the whole of it.</summary>
+    [HarmonyPatch(typeof(Helicopter), nameof(Helicopter.CheckWinchester))]
+    public static class Patch_V2_RemoteTf_WinchesterParity_Helo
+    {
+        static void Postfix(Helicopter __instance, ref bool __result)
+        {
+            if (!__result) return;
+            if (!RemoteGameplayOptions.Known) return;
+            if (!RemoteGameplayOptions.ASWBombersStaysWithSonobuoys) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
+
+            if (__instance._initialLoadoutCapabilities._hasASWTorpedoes
+                && __instance._currentLoadoutCapabilities._hasSonobuoys)
+                __result = false;
+        }
+    }
+
+    /// <summary>HOST-side PvP: the other half of the same item - Options → Gameplay's
+    /// PlayerAutoAttackSurface, read once, in AI.GetPossibleTargetsList.
+    ///
+    /// The stock test excludes a surface contact when
+    /// <c>!PlayerAutoAttackSurface &amp;&amp; IsPlayerObject &amp;&amp; !(is LandUnit) &amp;&amp;
+    /// !target.IsAirUnit</c> (AI.cs:3809). IsPlayerObject is false for the remote fleet,
+    /// so with the option OFF a player's own ships hold fire at weapons free while the
+    /// other player's - simulated here - open up regardless.
+    ///
+    /// Same escape-hatch shape as the winchester gate, so the same postfix treatment is
+    /// safe: this only ever REMOVES candidates the engine offered. It cannot make a ship
+    /// engage something the engine had already ruled out.
+    ///
+    /// The method is a private void that fills AI._possibleTargetsWithPriorities, so the
+    /// filtering happens on that dictionary rather than a return value - patched by
+    /// string name for the same reason.</summary>
+    [HarmonyPatch(typeof(AI), "GetPossibleTargetsList")]
+    public static class Patch_V2_RemoteTf_AutoAttackSurfaceParity
+    {
+        private static readonly List<ObjectBase> _drop = new();
+
+        static void Postfix(AI __instance, ObjectBase ____baseObject)
+        {
+            if (!RemoteGameplayOptions.Known) return;
+            if (RemoteGameplayOptions.AutoAttackSurface) return;   // owner allows it
+            if (____baseObject == null || ____baseObject is LandUnit) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(____baseObject)) return;
+
+            var targets = __instance._possibleTargetsWithPriorities;
+            if (targets == null || targets.Count == 0) return;
+
+            _drop.Clear();
+            foreach (var kv in targets)
+            {
+                var t = kv.Key;
+                if (t == null || t.IsAirUnit) continue;
+                // An explicitly designated target is not auto-attack, and this option
+                // does not govern it: the stock test lives inside the candidate loop,
+                // while _objectToDestroy is entered separately and at priority 0.
+                // Dropping it here would silently cancel the owner's own attack order.
+                if (ReferenceEquals(t, __instance._objectToDestroy)) continue;
+                _drop.Add(t);
+            }
+
+            for (int i = 0; i < _drop.Count; i++) targets.Remove(_drop[i]);
+            _drop.Clear();
         }
     }
 

@@ -14,6 +14,9 @@ namespace SeapowerMultiplayer.Messages
         public byte   AssignedTaskforce;       // reserved (used from P1)
         public int    ClientUidBase;           // client-local UID band start (used from P2)
         public byte   StateRateHz;
+        /// <summary>The host's Options → Gameplay settings, packed - the return half of
+        /// the Hello exchange. See <see cref="RemoteGameplayOptions"/>.</summary>
+        public byte   GameplayOptions;
 
         public MessageType Type => MessageType.Welcome;
 
@@ -25,6 +28,7 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(AssignedTaskforce);
             writer.Put(ClientUidBase);
             writer.Put(StateRateHz);
+            writer.Put(GameplayOptions);
         }
 
         public static WelcomeMessage Deserialize(NetDataReader reader) => new()
@@ -35,6 +39,7 @@ namespace SeapowerMultiplayer.Messages
             AssignedTaskforce = reader.GetByte(),
             ClientUidBase     = reader.GetInt(),
             StateRateHz       = reader.GetByte(),
+            GameplayOptions   = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
         };
     }
 }
