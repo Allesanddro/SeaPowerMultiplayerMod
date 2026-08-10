@@ -177,14 +177,25 @@ namespace SeapowerMultiplayer
                 bool auto = ws != null && ws._isAutoEngaging;
                 byte state = (byte)(ws != null ? (int)ws._engageState : 0);
 
+                var target = ws?._targetObject;
+                int targetId = (target != null && !target.IsDestroyed) ? target.UniqueID : 0;
+
                 _scratch.Add(new UnitStatusMessage.Mount
                 {
                     ExecutingEngageTask = exec,
                     AutoEngaging        = auto,
                     EngageState         = state,
+                    TargetId            = targetId,
                 });
                 _packed.Add((byte)((exec ? 1 : 0) | (auto ? 2 : 0)));
                 _packed.Add(state);
+                // Into the change signature, so a mount switching targets re-sends even
+                // when its engage state has not moved. Four bytes rather than a hash:
+                // this list is compared, not stored per unit beyond the last packet.
+                _packed.Add((byte)targetId);
+                _packed.Add((byte)(targetId >> 8));
+                _packed.Add((byte)(targetId >> 16));
+                _packed.Add((byte)(targetId >> 24));
             }
         }
 
@@ -311,6 +322,79 @@ namespace SeapowerMultiplayer
                 if (line.Value == e.OrderText) continue;
 
                 line.Value = e.OrderText;
+            }
+        }
+
+        /// <summary>
+        /// CLIENT: train each engaging mount on the target the host says it is engaging.
+        ///
+        /// The slew is WeaponSystem.alignToTarget → _mount.rotate, driven by the
+        /// launcher's own engagement - which a client never has, because the shot is
+        /// relayed and the round returns as a replica. So mounts sat where they were and
+        /// missiles simply appeared as the ship fired. CIWS were the exception and gave
+        /// the game away: CosmeticEventHandler hands them a target when the CiwsStart
+        /// burst arrives, so they DID slew, but only from the moment they opened fire -
+        /// the reported "shooting off to the side and turning in".
+        ///
+        /// Calling the stock alignToTarget rather than steering the mount ourselves is
+        /// the whole point. It is virtual, so a launcher gets
+        /// WeaponSystemLauncher's override - which routes to RotateToFixedAngles when
+        /// _vwp._useLaunchAngle, or picks the nearest preferred arc - and a gun gets the
+        /// base implementation. Those are the same overrides the HOST calls, so whatever
+        /// the mount does there it now does here. A mount that genuinely rotates to a
+        /// constant hull-relative angle before launch is not a bug to be corrected; it
+        /// is the behaviour, and reproducing it is the job.
+        ///
+        /// SAFE TO DRIVE FROM OUTSIDE: alignToTarget clears _isInRestPosition, stamps
+        /// _lastUsageTime and rotates. It does not fire, does not touch the engage task,
+        /// and cannot start one - the client's own gun path is redirected upstream by
+        /// Patch_V2_GunFire_Upstream regardless. The _lastUsageTime stamp is wanted:
+        /// it keeps the stock rest-return from dragging the mount back while it aims.
+        ///
+        /// The flags come from the host and only ever describe a mount already engaging,
+        /// so this cannot aim a mount the host has at rest.
+        /// </summary>
+        public static void ClientLateAimMounts()
+        {
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (_desired.Count == 0) return;
+
+            foreach (var kv in _desired)
+            {
+                var e = kv.Value;
+                if (e.Mounts == null || e.Mounts.Count == 0) continue;
+
+                var unit = StateSerializer.FindById(e.UniqueId);
+                if (unit == null || unit.IsDestroyed) continue;
+
+                var systems = unit._obp?._weaponSystems;
+                if (systems == null) continue;
+
+                int count = Mathf.Min(systems.Count, e.Mounts.Count);
+                for (int i = 0; i < count; i++)
+                {
+                    var m = e.Mounts[i];
+                    if (m.TargetId == 0) continue;
+                    if (!m.ExecutingEngageTask && !m.AutoEngaging) continue;
+
+                    var ws = systems[i];
+                    if (ws == null || ws.Inoperable.Value) continue;
+
+                    var target = ReplicaRegistry.Find(m.TargetId) ?? StateSerializer.FindById(m.TargetId);
+                    if (target == null || target.IsDestroyed) continue;
+
+                    // Mirrors the host's own call sites: guns and CIWS pass false
+                    // (WeaponSystemGun.cs:330, WeaponSystemCIWS.cs:675), launchers pass
+                    // their fixed vertical launch angle (WeaponSystemLauncher.cs:606).
+                    bool fixedAngle = ws is WeaponSystemLauncher
+                                   && ws._vwp != null && ws._vwp._fixVerticalLaunchAngleForLauncher;
+
+                    try { ws.alignToTarget(target.getUnityPosition(), fixedAngle, 0); }
+                    catch (System.Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[UnitStatus] {unit.name} mount {i} alignToTarget threw: {ex.Message}");
+                    }
+                }
             }
         }
 

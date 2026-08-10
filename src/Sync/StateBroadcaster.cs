@@ -37,7 +37,14 @@ namespace SeapowerMultiplayer
             if (SimSyncManager.CurrentState != SimState.Synchronized) return;
             if (SessionManager.SceneLoading) return;
 
-            try { UnitStatusManager.ClientLateAssertText(); }
+            try
+            {
+                UnitStatusManager.ClientLateAssertText();
+                // Also per-frame, and for the same reason - a mount slews at so many
+                // degrees per second, so it wants driving every frame rather than on a
+                // timer that would make it step.
+                UnitStatusManager.ClientLateAimMounts();
+            }
             catch (System.Exception ex)
             {
                 Plugin.Log.LogWarning($"[UnitStatus] Late status assert failed: {ex.Message}");

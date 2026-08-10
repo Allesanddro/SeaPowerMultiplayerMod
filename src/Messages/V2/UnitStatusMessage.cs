@@ -34,6 +34,19 @@ namespace SeapowerMultiplayer.Messages
             public bool ExecutingEngageTask;
             public bool AutoEngaging;
             public byte EngageState;   // WeaponSystem.EngageState (40 values)
+
+            /// <summary>What this mount is training on (WeaponSystem._targetObject), or
+            /// 0. The client knew a mount was engaging but not at WHAT, so its mounts
+            /// never trained: the slew is WeaponSystem.alignToTarget → _mount.rotate,
+            /// driven by the launcher's own engagement, and on a client that engagement
+            /// never exists - the shot is relayed and the round comes back as a replica.
+            ///
+            /// CIWS were the exception, and the tell: CosmeticEventHandler sets
+            /// _currentClosestTarget when the CiwsStart burst event arrives, so they
+            /// slewed - but only from the moment they opened fire, which is why they
+            /// were seen shooting off to one side and turning in. Cannons and missile
+            /// launchers, which get no target at all, never moved.</summary>
+            public int TargetId;
         }
 
         public struct Entry
@@ -95,6 +108,7 @@ namespace SeapowerMultiplayer.Messages
                     byte flags = (byte)((mount.ExecutingEngageTask ? 1 : 0) | (mount.AutoEngaging ? 2 : 0));
                     writer.Put(flags);
                     writer.Put(mount.EngageState);
+                    writer.Put(mount.TargetId);
                 }
             }
         }
@@ -121,6 +135,7 @@ namespace SeapowerMultiplayer.Messages
                         ExecutingEngageTask = (flags & 1) != 0,
                         AutoEngaging        = (flags & 2) != 0,
                         EngageState         = reader.GetByte(),
+                        TargetId            = reader.GetInt(),
                     });
                 }
                 msg.Entries.Add(entry);
