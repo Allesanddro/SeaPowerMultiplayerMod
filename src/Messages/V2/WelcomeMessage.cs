@@ -17,6 +17,9 @@ namespace SeapowerMultiplayer.Messages
         /// <summary>The host's Options → Gameplay settings, packed - the return half of
         /// the Hello exchange. See <see cref="RemoteGameplayOptions"/>.</summary>
         public byte   GameplayOptions;
+        /// <summary>The host's enabled mod set - see <see cref="ModSetCheck"/>.</summary>
+        public uint   ModFingerprint;
+        public byte   ModCount;
 
         public MessageType Type => MessageType.Welcome;
 
@@ -29,6 +32,8 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(ClientUidBase);
             writer.Put(StateRateHz);
             writer.Put(GameplayOptions);
+            writer.Put(ModFingerprint);
+            writer.Put(ModCount);
         }
 
         public static WelcomeMessage Deserialize(NetDataReader reader) => new()
@@ -40,6 +45,8 @@ namespace SeapowerMultiplayer.Messages
             ClientUidBase     = reader.GetInt(),
             StateRateHz       = reader.GetByte(),
             GameplayOptions   = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
+            ModFingerprint    = reader.AvailableBytes >= 4 ? reader.GetUInt() : 0u,
+            ModCount          = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
         };
     }
 }

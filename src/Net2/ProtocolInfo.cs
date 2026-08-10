@@ -12,9 +12,9 @@ namespace SeapowerMultiplayer.Net2
         // 230 batches every wire change made since 229 shipped: FlightDeckState carries
         // the accountable-ammo pools, UnitStatus carries aircraft fuel and each mount's
         // target, SubmarineMast reinterprets Speed as the desired state rather than a
-        // toggle, and Hello/Welcome each carry the sender's packed gameplay options. One
-        // bump, because none of them had shipped yet - keep adding to this line until it
-        // does.
+        // toggle, and Hello/Welcome each carry the sender's packed gameplay options plus
+        // its enabled-mod fingerprint. One bump, because none of them had shipped yet -
+        // keep adding to this line until it does.
         public const ushort ProtocolVersion = 230;
 
         /// <summary>

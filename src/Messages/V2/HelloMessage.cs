@@ -18,6 +18,11 @@ namespace SeapowerMultiplayer.Messages
         /// they are per-machine facts about the PLAYER, which is exactly what the
         /// handshake is for.</summary>
         public byte GameplayOptions;
+        /// <summary>Fingerprint and size of the sender's enabled mod set - see
+        /// <see cref="ModSetCheck"/>. A hash rather than the names because the handshake
+        /// must stay under the MTU floor.</summary>
+        public uint ModFingerprint;
+        public byte ModCount;
 
         public MessageType Type => MessageType.Hello;
 
@@ -28,6 +33,8 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(IsPvP);
             writer.Put(GameVersion);
             writer.Put(GameplayOptions);
+            writer.Put(ModFingerprint);
+            writer.Put(ModCount);
         }
 
         // GameVersion is read only if the sender actually wrote it: a pre-221 client
@@ -42,6 +49,8 @@ namespace SeapowerMultiplayer.Messages
             // Same tolerance as GameVersion above, for the same reason: an older
             // client has to parse cleanly enough to be TOLD its protocol is wrong.
             GameplayOptions = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
+            ModFingerprint  = reader.AvailableBytes >= 4 ? reader.GetUInt() : 0u,
+            ModCount        = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
         };
     }
 }
