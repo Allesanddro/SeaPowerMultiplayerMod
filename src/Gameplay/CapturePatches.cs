@@ -513,6 +513,57 @@ namespace SeapowerMultiplayer
             });
             Telemetry.Count("v2.capturedHatch");
         }
+
+        /// <summary>The rail load / unload, which is a launcher-level event rather than a
+        /// container one - spawnWeapons() walks every container itself.
+        ///
+        /// Not deduped like the hatches above: load and unload are already discrete
+        /// one-shots from the launcher's state machine (each fires once per transition
+        /// into LoadAmmunition / UnloadAmmunition), and unlike a hatch there is no
+        /// "already in that state" to suppress - reloading the same ammo again is a real
+        /// event that has to reach the client.</summary>
+        internal static void OnRail(WeaponSystemLauncher launcher, string? ammoName, bool unload)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            var unit = launcher._baseObject;
+            if (unit == null) return;
+            int mountIdx = CaptureState.MountIndexOf(unit, launcher);
+            if (mountIdx < 0) return;
+            if (!unload && string.IsNullOrEmpty(ammoName)) return;
+
+            NetworkManager.Instance.BroadcastToClients(new WeaponHatchEventMessage
+            {
+                UnitId     = unit.UniqueID,
+                MountIndex = (short)mountIdx,
+                LoadAmmo   = unload ? "" : ammoName!,
+                Unload     = unload,
+            });
+            Telemetry.Count(unload ? "v2.capturedRailUnload" : "v2.capturedRailLoad");
+        }
+    }
+
+    /// <summary>The launcher putting a round on its rails. Captured at
+    /// playLoadAnimation because that is the one place the decision is already made and
+    /// the ammunition is known - _spawnedAmmunition is assigned immediately before the
+    /// call (WeaponSystemLauncher.cs:1462-1463).</summary>
+    [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.playLoadAnimation))]
+    public static class Patch_V2_RailLoad_Capture
+    {
+        static void Postfix(WeaponSystemLauncher __instance)
+        {
+            var ammoRef = WeaponHatchHandler.SpawnedAmmoRef;
+            if (ammoRef == null) return;
+            HatchStateCapture.OnRail(__instance, ammoRef(__instance)?._ap?._ammunitionFileName, unload: false);
+        }
+    }
+
+    /// <summary>And taking it off again - a launcher swapping to different ammunition
+    /// unloads first.</summary>
+    [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.playUnloadAnimation))]
+    public static class Patch_V2_RailUnload_Capture
+    {
+        static void Postfix(WeaponSystemLauncher __instance)
+            => HatchStateCapture.OnRail(__instance, null, unload: true);
     }
 
     /// <summary>The launcher's SYSTEM animation - the outer door over a whole launcher

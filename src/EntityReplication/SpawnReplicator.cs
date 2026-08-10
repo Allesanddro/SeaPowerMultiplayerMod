@@ -340,6 +340,46 @@ namespace SeapowerMultiplayer
             return fallback;
         }
 
+        /// <summary>Take the round that just launched off its rail.
+        ///
+        /// THE ASYMMETRY THIS EXISTS FOR: on the host, the object sitting on the rail IS
+        /// the missile - the launch flies the very object spawnWeapons() put there, so
+        /// the rail empties by itself. On a client the missile arrives as a separate
+        /// replica, so a rail loaded by WeaponHatchHandler would still be holding its
+        /// round while the replica flies away. Two missiles, one shot.
+        ///
+        /// There is no host event to key off: WeaponContainer.unload appears only in
+        /// destroyWeapons() and RefillAmmo, never on the launch path. So the pairing is
+        /// inferred from the spawn itself - the round is leaving a launcher on this
+        /// shooter that is holding this ammunition, and ONE container is emptied, the
+        /// first that matches.
+        ///
+        /// Conservative on purpose. A launcher that has no matching loaded round is left
+        /// alone, so a VLS or any other system this does not model cannot be disturbed:
+        /// the failure mode is a rail that stays full for a moment longer, not one that
+        /// empties when it should not.</summary>
+        private static void ClearRailFor(ObjectBase shooter, string ammoName)
+        {
+            var systems = shooter._obp?._weaponSystems;
+            if (systems == null || string.IsNullOrEmpty(ammoName)) return;
+
+            for (int s = 0; s < systems.Count; s++)
+            {
+                if (!(systems[s] is WeaponSystemLauncher launcher)) continue;
+                var containers = launcher._containers;
+                if (containers == null) continue;
+
+                for (int c = 0; c < containers.Count; c++)
+                {
+                    var container = containers[c];
+                    if (container?._loadedAmmunition?._ap?._ammunitionFileName != ammoName) continue;
+
+                    container.unload(returnAmmo: false);
+                    return; // one round, one rail
+                }
+            }
+        }
+
         /// <summary>Which local taskforce a replicated spawn belongs to, given the side
         /// byte the HOST stamped on it.
         ///
@@ -439,6 +479,7 @@ namespace SeapowerMultiplayer
             {
                 wb.setNation(shooter.Nation.Value);
                 wb._taskforce = shooter._taskforce;
+                ClearRailFor(shooter, ap._ammunitionFileName);
             }
 
             // Place at the streamed spawn point before launch settings run

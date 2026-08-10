@@ -33,6 +33,17 @@ namespace SeapowerMultiplayer
     /// treated as matching. Order can matter - where two mods override the same ini, the
     /// later one wins - but that is rare enough, and flagging it would fire on pairs who
     /// are in fact fine.
+    ///
+    /// KNOWN GAP: NAMES, NOT VERSIONS. A mod is identified by its directory name, so two
+    /// players on DIFFERENT VERSIONS of the same mod fingerprint identically and pass.
+    /// Workshop items update in place under the same published-file-ID directory, so
+    /// this is a live case rather than a theoretical one - and an update that adds a
+    /// weapon system to a vessel shifts exactly the indices this exists to protect.
+    /// _info.ini does not help: its ApproximateVersion tracks the GAME's MAJOR.MINOR as
+    /// a compatibility marker, not the mod's own version. Closing it means folding
+    /// SteamUGC.GetItemInstallInfo's punTimeStamp into the hash for subscribed items
+    /// (UI.WorkshopVersionCheck already works that API), with something weaker - write
+    /// time, or file names and sizes - for hand-installed mods.
     /// </summary>
     internal static class ModSetCheck
     {
