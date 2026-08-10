@@ -162,7 +162,7 @@ namespace SeapowerMultiplayer
         private static void SpawnUnitReplica(EntitySpawnMessage msg)
         {
             var homeBase = StateSerializer.FindById(msg.HomeBaseId);
-            Taskforce? tf = homeBase?._taskforce ?? FindTaskforceBySide((Taskforce.TfType)msg.TaskforceSide);
+            Taskforce? tf = homeBase?._taskforce ?? ResolveTaskforce(msg.TaskforceSide);
             if (tf == null)
             {
                 Telemetry.Count("v2.unitSpawnNoTaskforce");
@@ -340,7 +340,66 @@ namespace SeapowerMultiplayer
             return fallback;
         }
 
-        private static Taskforce? FindTaskforceBySide(Taskforce.TfType side)
+        /// <summary>Which local taskforce a replicated spawn belongs to, given the side
+        /// byte the HOST stamped on it.
+        ///
+        /// TWO BUGS LIVED IN THE OLD ONE-LINE VERSION, which matched the enum by name
+        /// against TaskforceManager's list.
+        ///
+        /// (1) The byte is the side as the HOST sees it, and PvP hands the guest a save
+        /// with PlayerTaskforce and EnemyTaskforce swapped
+        /// (SessionManager.SwapTaskforceSides). Matching Player to Player therefore gave
+        /// a host-owned aircraft to the guest's OWN taskforce: it rendered friendly,
+        /// could not be controlled (it is still a replica), and every missile it fired
+        /// inherited the same wrong side, because SpawnWeaponReplica copies
+        /// objectBase._taskforce straight across. Playtest 28 reported both halves. The
+        /// fallback is reached whenever HomeBaseId is 0 or its object has no local
+        /// replica yet, so it is not a rare path.
+        ///
+        /// (2) TaskforceManager reparents itself to Globals._missionSingletonsParent in
+        /// Awake exactly as ObjectsManager does, but MissionManager's unload hand-destroys
+        /// only ObjectsManager - so Singleton's static _instance survives the mission,
+        /// _taskForces has no Clear anywhere in the assembly, and SceneCreator APPENDS
+        /// the next mission's taskforces to it. The first match for a side, after a
+        /// second battle in one lobby, is a DEAD taskforce from the first one.
+        ///
+        /// Resolving against Globals closes both: those three fields are rebuilt per
+        /// mission, so they cannot be stale, and the PvP inversion is applied explicitly
+        /// instead of being implied by a name. Done here rather than by sending
+        /// "mine/theirs" on the wire because the receiver is the only side that knows
+        /// whether its own save was swapped - and it costs no protocol change.</summary>
+        private static Taskforce? ResolveTaskforce(byte hostSide)
+        {
+            var side = (Taskforce.TfType)hostSide;
+
+            // Only the guest's save is rewritten, and only in PvP. The host's own view
+            // is never swapped, so its side byte means exactly what it says there.
+            bool swapped = Plugin.Instance.CfgPvP.Value && !Plugin.Instance.CfgIsHost.Value;
+
+            switch (side)
+            {
+                case Taskforce.TfType.Player:
+                    return swapped ? Globals._enemyTaskforce : Globals._playerTaskforce;
+
+                case Taskforce.TfType.Enemy:
+                    return swapped ? Globals._playerTaskforce : Globals._enemyTaskforce;
+
+                case Taskforce.TfType.Neutral:
+                    return Globals._neutralTaskforce;
+
+                default:
+                    // Ally (and None) have no Globals anchor, so these still take the
+                    // scan and still carry bug (2)'s stale risk. Left rather than
+                    // guessed at: a mission with a separate Ally taskforce spawning
+                    // replicated units through this fallback is the only way to reach
+                    // it, and inventing an anchor for it would be worse than the scan.
+                    return ScanTaskforcesForSide(side);
+            }
+        }
+
+        /// <summary>Last resort - see ResolveTaskforce's default branch for why this is
+        /// still here and what it can get wrong.</summary>
+        private static Taskforce? ScanTaskforcesForSide(Taskforce.TfType side)
         {
             if (!Singleton<TaskforceManager>.InstanceExists(false)) return null;
             foreach (var tf in Singleton<TaskforceManager>.Instance._taskForces)
