@@ -9,7 +9,11 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 230; // FlightDeckState carries accountable ammo
+        // 230 batches every wire change made since 229 shipped: FlightDeckState carries
+        // the accountable-ammo pools, UnitStatus carries aircraft fuel, and SubmarineMast
+        // reinterprets Speed as the desired state rather than a toggle. One bump, because
+        // none of them had shipped yet - keep adding to this line until it does.
+        public const ushort ProtocolVersion = 230;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

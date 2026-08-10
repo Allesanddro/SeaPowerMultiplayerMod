@@ -37,7 +37,7 @@ namespace SeapowerMultiplayer
 
         // ── Host capture ──────────────────────────────────────────────────────
 
-        private static readonly Dictionary<int, (string text, byte[] mounts)> _lastSent = new(256);
+        private static readonly Dictionary<int, (string text, byte[] mounts, float range)> _lastSent = new(256);
         private static readonly UnitStatusMessage _msg = new();
         private static readonly HashSet<int> _seen = new(256);
         private static readonly List<UnitStatusMessage.Mount> _scratch = new(64);
@@ -81,19 +81,22 @@ namespace SeapowerMultiplayer
 
                 string text = unit.CurrentOrderText?.Value ?? "";
                 BuildMounts(unit);
+                float range = FuelRangeOf(unit);
 
                 int id = unit.UniqueID;
                 _seen.Add(id);
 
                 bool known = _lastSent.TryGetValue(id, out var previous);
-                if (!full && known && previous.text == text && SamePacked(previous.mounts))
+                if (!full && known && previous.text == text && SamePacked(previous.mounts)
+                    && Mathf.Abs(previous.range - range) < FuelDeltaKm)
                     continue;
 
-                _lastSent[id] = (text, _packed.ToArray());
+                _lastSent[id] = (text, _packed.ToArray(), range);
                 _msg.Entries.Add(new UnitStatusMessage.Entry
                 {
                     UniqueId  = id,
                     OrderText = text,
+                    RangeKm   = range,
                     Mounts    = new List<UnitStatusMessage.Mount>(_scratch),
                 });
 
@@ -102,6 +105,46 @@ namespace SeapowerMultiplayer
 
             if (full) PruneLastSent();
             if (_msg.Entries.Count > 0) Flush();
+        }
+
+        /// <summary>How far RangeInKm has to move before it is worth a packet.
+        ///
+        /// Fuel changes every physics tick, so folding it into the change signature
+        /// raw would make every airborne unit emit continuously and turn a
+        /// change-detected stream into a per-tick one. Two kilometres is a few seconds
+        /// of cruise for a fast jet and a small fraction of any airframe's tank, and
+        /// the 10 s full sweep bounds the staleness regardless. This is a re-anchor,
+        /// not a feed: the client keeps burning locally in between, which is what
+        /// keeps the gauge moving smoothly rather than stepping.</summary>
+        private const float FuelDeltaKm = 2f;
+
+        /// <summary>RangeInKm for an air unit, 0 for anything else - ships and subs
+        /// have the property too but nothing burns it, so it would be a constant on
+        /// the wire and a permanent no-op at the far end.</summary>
+        private static float FuelRangeOf(ObjectBase unit)
+        {
+            if (!(unit is Aircraft) && !(unit is Helicopter)) return 0f;
+            return unit.RangeInKm?.Value ?? 0f;
+        }
+
+        /// <summary>Client: re-anchor an air unit's tank to the host's, then let the
+        /// game recompute everything that hangs off it.
+        ///
+        /// UpdateFuelConsumption is the game's own re-derivation - Aircraft's load path
+        /// calls exactly this pair, RangeInKm followed by UpdateFuelConsumption(0f)
+        /// (Aircraft.cs:1801-1802) - so ActualRangeInKm, RangeOnMap, EnduranceInSec and
+        /// the endurance ring all fall out of it rather than being set by hand here.
+        /// The two overloads differ only in signature.</summary>
+        private static void ApplyFuel(ObjectBase unit, float rangeKm)
+        {
+            if (rangeKm <= 0f) return;   // not an air unit on the host, or not known yet
+
+            var range = unit.RangeInKm;
+            if (range == null) return;
+            range.Value = rangeKm;
+
+            if (unit is Aircraft a)        a.UpdateFuelConsumption(0f);
+            else if (unit is Helicopter h) h.UpdateFuelConsumption();
         }
 
         /// <summary>Fills _scratch (wire form) and _packed (change-detection form)
@@ -206,7 +249,7 @@ namespace SeapowerMultiplayer
             {
                 var e = msg.Entries[i];
                 _desired[e.UniqueId] = e;
-                ApplyToUnit(e);
+                ApplyToUnit(e, fromNetwork: true);
             }
         }
 
@@ -216,10 +259,10 @@ namespace SeapowerMultiplayer
         {
             if (Plugin.Instance.CfgIsHost.Value) return;
             foreach (var kv in _desired)
-                ApplyToUnit(kv.Value);
+                ApplyToUnit(kv.Value, fromNetwork: false);
         }
 
-        private static void ApplyToUnit(UnitStatusMessage.Entry e)
+        private static void ApplyToUnit(UnitStatusMessage.Entry e, bool fromNetwork)
         {
             var unit = StateSerializer.FindById(e.UniqueId);
             // No warning on a miss: a replica may not be built yet, and a unit that
@@ -229,6 +272,14 @@ namespace SeapowerMultiplayer
             var line = unit.CurrentOrderText;
             if (line != null && line.Value != e.OrderText)
                 line.Value = e.OrderText;
+
+            // Fuel on a REAL update only. The reassert replays this same entry twice a
+            // second off _desired, and re-imposing a fuel figure the client has since
+            // burned past would drag the gauge backwards on every pump - a freeze, and
+            // a visibly jumping one, instead of the periodic re-anchor this is meant
+            // to be. Between anchors the client's own UpdateFuelConsumption keeps the
+            // number moving, which is what makes it smooth.
+            if (fromNetwork) ApplyFuel(unit, e.RangeKm);
 
             var systems = unit._obp?._weaponSystems;
             if (systems == null || e.Mounts == null) return;
