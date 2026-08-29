@@ -513,9 +513,36 @@ namespace SeapowerMultiplayer
                 }
                 else
                 {
+                    // Resolve the launcher's WeaponSystem for this ammo type.
+                    // This is critical for wire-guided torpedoes: CommonLaunchSettings
+                    // needs the weaponSystem to properly initialize wire guidance,
+                    // register in _launchedWeapons, and set _launchPlatform.
+                    WeaponSystem weaponSystem = null;
+                    if (shooter != null)
+                    {
+                        var systems = shooter.GetWeaponSystemsForAmmunition(msg.AmmoName, copyList: false);
+                        if (systems != null && systems.Count > 0)
+                        {
+                            weaponSystem = systems[0];
+                        }
+                    }
+
                     // Real initializer: _launchTime, parent detach, _proximityRadius,
                     // taskforce/plotting registration, target._incomingWeapons (threat UI)
-                    wb.CommonLaunchSettings(target, aimUnity, null, isSub);
+                    wb.CommonLaunchSettings(target, aimUnity, weaponSystem, isSub);
+
+                    // For wire-guided weapons, ensure wire guidance state is properly
+                    // initialized on the client replica. CommonLaunchSettings handles
+                    // most of this when weaponSystem is provided, but we explicitly
+                    // ensure the state for safety.
+                    if (ap._midCourseCorrection == AmmunitionParameters.MidCourseCorrection.WireGuided
+                        && weaponSystem != null && shooter != null)
+                    {
+                        wb._launchPlatform = shooter;
+                        wb._onWire = true;
+                        wb.ConnectionLost.Value = false;
+                        wb.ConnectionLostForever.Value = false;
+                    }
                 }
             }
 
