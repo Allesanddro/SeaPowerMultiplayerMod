@@ -1183,18 +1183,13 @@ namespace SeapowerMultiplayer
             // current position for that case, or the raw aim point for bearing fire.
             Vector3 aim = targetObject != null ? targetObject.transform.position : targetPosition;
 
-            // Mode-faithful coordinate encoding (matches the host's decode):
-            // PvP = GeoPosition (floating-origin safe), co-op = shared local coords.
-            float x, y, z;
-            if (Plugin.Instance.CfgPvP.Value)
-            {
-                var geo = Utils.worldPositionFromUnityToLongLat(aim, Globals._currentCenterTile);
-                x = (float)geo._longitude; y = (float)geo._height; z = (float)geo._latitude;
-            }
-            else
-            {
-                x = aim.x; y = aim.y; z = aim.z;
-            }
+            // Always encode coordinates as GeoPosition (lat/lon/height) for all game modes.
+            // This ensures bearing-only launches work correctly regardless of floating origin
+            // tile shifts between host and client. The host will decode these as GeoPosition.
+            var geo = Utils.worldPositionFromUnityToLongLat(aim, Globals._currentCenterTile);
+            float x = (float)geo._longitude;
+            float y = (float)geo._height;
+            float z = (float)geo._latitude;
 
             if (isSonobuoy)
             {
@@ -3167,6 +3162,85 @@ namespace SeapowerMultiplayer
 
             // PRIORITY 2: Fall through to original method for auto-detection
             return true;
+        }
+    }
+
+    // ── Wire Control Forwarding ─────────────────────────────────────────────
+    // When a guest client controls a wire-guided torpedo (changes speed, depth, or cuts wire),
+    // forward the command to the host. The host will execute it and replicate the state back.
+
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.SetWireSpeedSetting))]
+    public static class Patch_Torpedo_SetWireSpeedSetting
+    {
+        static bool Prefix(Torpedo __instance, int index)
+        {
+            // Skip if not in multiplayer or if this is the host
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+
+            // Forward to host
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireSpeed,
+                Speed = index
+            };
+            NetworkManager.Instance.SendToServer(msg);
+
+            // Skip local execution - host will replicate back
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.OrderWireDepth))]
+    public static class Patch_Torpedo_OrderWireDepth
+    {
+        static bool Prefix(Torpedo __instance, float depthInFeet)
+        {
+            // Skip if not in multiplayer or if this is the host
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+
+            // Forward to host
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireDepth,
+                Speed = depthInFeet
+            };
+            NetworkManager.Instance.SendToServer(msg);
+
+            // Skip local execution - host will replicate back
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.BreakWire))]
+    public static class Patch_WeaponBase_BreakWire
+    {
+        static bool Prefix(WeaponBase __instance)
+        {
+            // Skip if not in multiplayer or if this is the host
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+
+            // Only forward for wire-guided weapons
+            if (__instance._ap?._midCourseCorrection != AmmunitionParameters.MidCourseCorrection.WireGuided)
+                return true;
+
+            // Forward to host
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireCut
+            };
+            NetworkManager.Instance.SendToServer(msg);
+
+            // Skip local execution - host will replicate back
+            return false;
         }
     }
 }
