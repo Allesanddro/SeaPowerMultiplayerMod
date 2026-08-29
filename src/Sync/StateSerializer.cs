@@ -653,16 +653,11 @@ namespace SeapowerMultiplayer
                         ObjectBase? target = null;
                         if (msg.TargetEntityId > 0)
                             target = StateSerializer.FindById(msg.TargetEntityId);
-                        var targetPos = new Vector3(msg.TargetX, msg.TargetY, msg.TargetZ);
-                        // PvP: coordinates are always GeoPosition - always convert back.
-                        // This is needed even when target is found, because the game falls
-                        // back to targetPosition if the target is destroyed mid-flight.
-                        if (Plugin.Instance.CfgPvP.Value)
-                        {
-                            var geo = new GeoPosition { _longitude = msg.TargetX, _latitude = msg.TargetZ, _height = msg.TargetY };
-                            Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
-                            targetPos = new Vector3(local.x, msg.TargetY, local.y);
-                        }
+                        // Coordinates are always encoded as GeoPosition (lat/lon/height) regardless of game mode.
+                        // Convert back to local Unity coordinates. This is needed even when target is found,
+                        // because the game falls back to targetPosition if the target is destroyed mid-flight.
+                        var geo = new GeoPosition { _longitude = msg.TargetX, _latitude = msg.TargetZ, _height = msg.TargetY };
+                        var targetPos = Utils.longLatToLocalV3(geo, Globals._currentCenterTile);
                         if (target != null)
                         {
                             // The remote player's attack decision is authoritative -
@@ -983,6 +978,60 @@ namespace SeapowerMultiplayer
                             finally { OrderHandler.ApplyingFromNetwork = false; }
                             Plugin.Log.LogInfo($"[Order] Applied JamSystem for {unit?.name} " +
                                 $"(id={msg.SourceEntityId}): bearing {msg.TargetZ:F3},{msg.TargetX:F3}");
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireSpeed:
+                    {
+                        // Wire-guided torpedo speed change. SourceEntityId is the torpedo itself.
+                        ObjectBase? torpedoObj = StateSerializer.FindById(msg.SourceEntityId);
+                        if (torpedoObj is Torpedo torpedo)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { torpedo.SetWireSpeedSetting((int)msg.Speed); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                            Plugin.Log.LogInfo($"[Order] TorpedoWireSpeed: torpedo={torpedo.UniqueID} speedIndex={(int)msg.Speed}");
+                        }
+                        else
+                        {
+                            Plugin.Log.LogWarning($"[Order] TorpedoWireSpeed: torpedo id={msg.SourceEntityId} not found");
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireDepth:
+                    {
+                        // Wire-guided torpedo depth change. SourceEntityId is the torpedo itself.
+                        ObjectBase? torpedoObj = StateSerializer.FindById(msg.SourceEntityId);
+                        if (torpedoObj is Torpedo torpedo)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { torpedo.OrderWireDepth(msg.Speed); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                            Plugin.Log.LogInfo($"[Order] TorpedoWireDepth: torpedo={torpedo.UniqueID} depth={msg.Speed}ft");
+                        }
+                        else
+                        {
+                            Plugin.Log.LogWarning($"[Order] TorpedoWireDepth: torpedo id={msg.SourceEntityId} not found");
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireCut:
+                    {
+                        // Sever wire guidance connection. SourceEntityId is the torpedo itself.
+                        ObjectBase? torpedoObj = StateSerializer.FindById(msg.SourceEntityId);
+                        if (torpedoObj is WeaponBase wb)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { wb.BreakWire(); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                            Plugin.Log.LogInfo($"[Order] TorpedoWireCut: torpedo={wb.UniqueID}");
+                        }
+                        else
+                        {
+                            Plugin.Log.LogWarning($"[Order] TorpedoWireCut: torpedo id={msg.SourceEntityId} not found");
                         }
                         break;
                     }
